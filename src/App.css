@@ -1,0 +1,95 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
+  background: #1c1c1e;
+  color: #f5f5f7;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  padding-left: 80px; /* відступ для кнопок вікна macOS */
+  background: #2c2c2e;
+  border-bottom: 1px solid #3a3a3c;
+  flex-shrink: 0;
+  -webkit-app-region: drag; /* дозволяє перетягувати вікно за тулбар */
+}
+
+.toolbar > * {
+  -webkit-app-region: no-drag;
+}
+
+.app-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: #aeaeb2;
+  margin-right: 4px;
+}
+
+.project-name {
+  background: #3a3a3c;
+  border: 1px solid #48484a;
+  border-radius: 6px;
+  color: #fff;
+  padding: 5px 10px;
+  font-size: 13px;
+  width: 160px;
+  outline: none;
+}
+
+.project-name:focus {
+  border-color: #0071e3;
+}
+
+.toolbar button {
+  background: #3a3a3c;
+  color: #f5f5f7;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  transition: background 0.15s;
+}
+
+.toolbar button:hover {
+  background: #48484a;
+}
+
+.toolbar button.primary {
+  background: #0071e3;
+  color: #fff;
+}
+
+.toolbar button.primary:hover {
+  background: #0077ed;
+}
+
+.status {
+  font-size: 13px;
+  color: #30d158;
+  font-weight: 500;
+}
+
+.canvas-wrap {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  background: #111;
+}

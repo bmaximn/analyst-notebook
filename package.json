@@ -1,0 +1,38 @@
+{
+  "name": "analyst-notebook",
+  "version": "0.1.0",
+  "description": "Simplified i2 Analyst's Notebook for Mac",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && ELECTRON_DEV=true electron .\"",
+    "build": "vite build && electron-builder --mac",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@xyflow/react": "^12.3.6",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "concurrently": "^9.1.0",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "vite": "^5.4.11",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.analyst.notebook",
+    "productName": "Analyst's Notebook",
+    "mac": {
+      "category": "public.app-category.productivity"
+    },
+    "directories": {
+      "output": "dist-electron"
+    },
+    "files": [
+      "dist/**",
+      "electron/**"
+    ]
+  }
+}
