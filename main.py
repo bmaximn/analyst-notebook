@@ -10,7 +10,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QScrollArea, QSizePolicy, QStyle, QStyleFactory,
     QFrame, QSplitter, QAbstractScrollArea, QStackedWidget, QInputDialog,
     QGraphicsLineItem, QGraphicsEllipseItem, QGraphicsRectItem,
-    QGraphicsSimpleTextItem, QSpinBox, QListWidget, QListWidgetItem
+    QGraphicsSimpleTextItem, QSpinBox, QListWidget, QListWidgetItem,
+    QGroupBox, QToolButton, QTableWidget, QTableWidgetItem
 )
 from PyQt6.QtCore import (
     Qt, QRectF, QPointF, QSizeF, QTimer, QObject, pyqtSignal, QLineF, QSize
@@ -2377,72 +2378,75 @@ def load_from_json(canvas: DiagramCanvas, filepath: str) -> tuple[bool, str]:
 
 
 def import_from_csv(
-    canvas: DiagramCanvas,
+    canvas: 'DiagramCanvas',
     nodes_filepath: str,
-) -> tuple[int, int, str]:
+    delimiter: str = ',',
+    node_map: Optional[dict] = None,
+    link_map: Optional[dict] = None,
+) -> tuple:
     """Імпортує вузли з nodes.csv та (якщо є) зв'язки з links.csv.
 
-    nodes.csv: id, type, title, note, date, color, x, y
-    links.csv: source_id, target_id, label, line_type, direction, note
-
+    node_map / link_map: dict field_name → column_name (None = skip).
+    Підтримує поля v2: strength, date_time, source_reference, weighting_value.
     Повертає (кількість_вузлів, кількість_зв'язків, рядок_помилки_або_порожній).
     """
     nodes_path = Path(nodes_filepath)
     links_path = nodes_path.parent / 'links.csv'
 
-    # --- Перевіряємо обов'язковий файл вузлів ---
     if not nodes_path.is_file():
         return 0, 0, f'Файл не знайдено: {nodes_filepath}'
 
-    # Відображення: id з CSV → UUID нового вузла
-    id_to_uuid: dict[str, str] = {}
-    nodes_count = 0
-    errors: list[str] = []
+    # Дефолтний маппінг — назви колонок збігаються з іменами полів
+    if node_map is None:
+        node_map = {f: f for f in ('id', 'title', 'type', 'note', 'date', 'color', 'x', 'y')}
+    if link_map is None:
+        link_map = {f: f for f in (
+            'source_id', 'target_id', 'label', 'direction', 'strength',
+            'date_time', 'source_reference', 'weighting_value', 'note',
+        )}
 
-    # Лічильник для авторозміщення в сітку (використовується, якщо x/y порожні)
+    def gcol(row: dict, field: str, mapping: dict) -> str:
+        col = mapping.get(field)
+        return row.get(col, '').strip() if col else ''
+
+    id_to_uuid: dict = {}
+    nodes_count = 0
+    errors: list = []
     auto_col = 0
     auto_row = 0
     auto_cols_per_row = 8
     auto_step = 150
 
-    # --- Читаємо вузли ---
     try:
         with open(nodes_path, newline='', encoding='utf-8-sig') as fh:
-            reader = csv.DictReader(fh)
-
-            # Перевіряємо наявність обов'язкових стовпців
+            reader = csv.DictReader(fh, delimiter=delimiter)
             if reader.fieldnames is None:
                 return 0, 0, 'nodes.csv: порожній файл або відсутні заголовки.'
 
-            required_node_cols = {'id', 'title'}
-            missing = required_node_cols - set(reader.fieldnames)
+            id_col = node_map.get('id', 'id')
+            title_col = node_map.get('title', 'title')
+            required = {c for c in [id_col, title_col] if c}
+            missing = required - set(reader.fieldnames)
             if missing:
                 return 0, 0, f'nodes.csv: відсутні стовпці: {", ".join(sorted(missing))}'
 
             for row_num, row in enumerate(reader, start=2):
-                row_id = row.get('id', '').strip()
+                row_id = gcol(row, 'id', node_map)
                 if not row_id:
                     errors.append(f'nodes.csv рядок {row_num}: порожній id — пропущено')
                     continue
 
-                # Визначаємо тип; якщо невідомий — використовуємо 'Document'
-                raw_type = row.get('type', '').strip()
+                raw_type = gcol(row, 'type', node_map)
                 node_type = raw_type if raw_type in NODE_TYPES else 'Document'
-
-                # Колір: зі стовпця або стандартний для типу
-                raw_color = row.get('color', '').strip()
+                raw_color = gcol(row, 'color', node_map)
                 node_color = raw_color if raw_color else None
 
-                # Координати: з CSV або авторозміщення
-                raw_x = row.get('x', '').strip()
-                raw_y = row.get('y', '').strip()
-
+                raw_x = gcol(row, 'x', node_map)
+                raw_y = gcol(row, 'y', node_map)
                 if raw_x and raw_y:
                     try:
-                        node_x = float(raw_x)
-                        node_y = float(raw_y)
+                        node_x, node_y = float(raw_x), float(raw_y)
                     except ValueError:
-                        # Якщо не вдалось — авторозміщення
                         node_x = auto_col * auto_step
                         node_y = auto_row * auto_step
                         auto_col += 1
@@ -2459,14 +2463,11 @@ def import_from_csv(
 
                 node = Node(
                     type=node_type,
-                    title=row.get('title', '').strip(),
-                    note=row.get('note', '').strip(),
-                    date=row.get('date', '').strip(),
-                    x=node_x,
-                    y=node_y,
-                    color=node_color,
+                    title=gcol(row, 'title', node_map),
+                    note=gcol(row, 'note', node_map),
+                    date=gcol(row, 'date', node_map),
+                    x=node_x, y=node_y, color=node_color,
                 )
-
                 id_to_uuid[row_id] = node.uuid
                 canvas.add_node(node)
                 nodes_count += 1
@@ -2474,17 +2475,18 @@ def import_from_csv(
     except Exception as exc:
         return 0, 0, f'Помилка читання nodes.csv: {exc}'
 
-    # --- Читаємо зв'язки (якщо файл існує) ---
     links_count = 0
 
     if links_path.is_file():
         try:
             with open(links_path, newline='', encoding='utf-8-sig') as fh:
-                reader = csv.DictReader(fh)
+                reader = csv.DictReader(fh, delimiter=delimiter)
 
                 if reader.fieldnames is not None:
-                    required_link_cols = {'source_id', 'target_id'}
-                    missing_link = required_link_cols - set(reader.fieldnames)
+                    src_col = link_map.get('source_id', 'source_id')
+                    tgt_col = link_map.get('target_id', 'target_id')
+                    required_link = {c for c in [src_col, tgt_col] if c}
+                    missing_link = required_link - set(reader.fieldnames)
 
                     if missing_link:
                         errors.append(
@@ -2493,8 +2495,8 @@ def import_from_csv(
                         )
                     else:
                         for row_num, row in enumerate(reader, start=2):
-                            src_id = row.get('source_id', '').strip()
-                            tgt_id = row.get('target_id', '').strip()
+                            src_id = gcol(row, 'source_id', link_map)
+                            tgt_id = gcol(row, 'target_id', link_map)
 
                             if not src_id or not tgt_id:
                                 errors.append(
@@ -2502,14 +2504,12 @@ def import_from_csv(
                                     f'порожній source_id або target_id — пропущено'
                                 )
                                 continue
-
                             if src_id not in id_to_uuid:
                                 errors.append(
                                     f'links.csv рядок {row_num}: '
                                     f'невідомий source_id "{src_id}" — пропущено'
                                 )
                                 continue
-
                             if tgt_id not in id_to_uuid:
                                 errors.append(
                                     f'links.csv рядок {row_num}: '
@@ -2517,31 +2517,29 @@ def import_from_csv(
                                 )
                                 continue
 
-                            # Визначаємо тип лінії (з валідацією)
-                            raw_line_type = row.get('line_type', '').strip()
-                            line_type = (
-                                raw_line_type
-                                if raw_line_type in LINE_TYPE_LABELS
-                                else 'solid_arrow'
-                            )
+                            raw_strength = gcol(row, 'strength', link_map)
+                            strength = raw_strength if raw_strength in LINK_STRENGTH_LABELS else 'Confirmed'
 
-                            # Визначаємо напрямок (з валідацією)
-                            raw_direction = row.get('direction', '').strip()
-                            direction = (
-                                raw_direction
-                                if raw_direction in DIRECTION_LABELS
-                                else 'source_to_target'
-                            )
+                            raw_dir = gcol(row, 'direction', link_map)
+                            direction = raw_dir if raw_dir in DIRECTION_LABELS else 'source_to_target'
+
+                            raw_w = gcol(row, 'weighting_value', link_map)
+                            try:
+                                weighting_value = float(raw_w) if raw_w else 0.0
+                            except ValueError:
+                                weighting_value = 0.0
 
                             link = Link(
                                 source_uuid=id_to_uuid[src_id],
                                 target_uuid=id_to_uuid[tgt_id],
-                                label=row.get('label', '').strip(),
-                                line_type=line_type,
+                                label=gcol(row, 'label', link_map),
                                 direction=direction,
-                                note=row.get('note', '').strip(),
+                                note=gcol(row, 'note', link_map),
+                                strength=strength,
+                                date_time=gcol(row, 'date_time', link_map),
+                                source_reference=gcol(row, 'source_reference', link_map),
+                                weighting_value=weighting_value,
                             )
-
                             canvas.add_link(link)
                             links_count += 1
 
@@ -2549,7 +2547,6 @@ def import_from_csv(
             errors.append(f'Помилка читання links.csv: {exc}')
 
     canvas.mark_modified()
-
     error_string = '\n'.join(errors) if errors else ''
     return nodes_count, links_count, error_string
 
@@ -3814,6 +3811,508 @@ class VisualSearchPanel(QWidget):
             node_it.setSelected(True)
 
 
+# =============================================================================
+# P3.5 — ImportWizard — триступеневий майстер імпорту CSV
+# =============================================================================
+
+class ImportWizard(QDialog):
+    """Wizard для імпорту nodes.csv + links.csv з маппінгом колонок і превью."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle('Імпорт CSV — майстер')
+        self.setMinimumSize(680, 540)
+        self.resize(740, 580)
+
+        self._nodes_path: str = ''
+        self._delimiter: str = ','
+        self._node_columns: list = []
+        self._link_columns: list = []
+        self._node_map: dict = {}  # field -> QComboBox
+        self._link_map: dict = {}
+        self._auto_layout_cb = QCheckBox('Авто-розміщення після імпорту')
+
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._build_page_file())
+        self._stack.addWidget(self._build_page_mapping())
+        self._stack.addWidget(self._build_page_preview())
+
+        self._step_label = QLabel()
+        self._step_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._btn_back = QPushButton('← Назад')
+        self._btn_next = QPushButton('Далі →')
+        self._btn_import = QPushButton('Імпортувати')
+        btn_cancel = QPushButton('Скасувати')
+        self._btn_back.clicked.connect(self._go_back)
+        self._btn_next.clicked.connect(self._go_next)
+        self._btn_import.clicked.connect(self.accept)
+        btn_cancel.clicked.connect(self.reject)
+
+        nav = QHBoxLayout()
+        nav.addStretch()
+        nav.addWidget(btn_cancel)
+        nav.addWidget(self._btn_back)
+        nav.addWidget(self._btn_next)
+        nav.addWidget(self._btn_import)
+
+        root = QVBoxLayout(self)
+        root.addWidget(self._step_label)
+        root.addWidget(self._stack, 1)
+        root.addLayout(nav)
+        self._update_nav()
+
+    # ---- page builders ----
+
+    def _build_page_file(self) -> QWidget:
+        w = QWidget()
+        fl = QFormLayout(w)
+        fl.setSpacing(12)
+
+        row = QHBoxLayout()
+        self._nodes_edit = QLineEdit()
+        self._nodes_edit.setPlaceholderText('Виберіть nodes.csv…')
+        self._nodes_edit.textChanged.connect(self._on_nodes_path_changed)
+        btn = QPushButton('Огляд…')
+        btn.clicked.connect(self._browse_nodes)
+        row.addWidget(self._nodes_edit, 1)
+        row.addWidget(btn)
+        fl.addRow('Файл вузлів (nodes.csv):', row)
+
+        self._links_status = QLabel('<i>links.csv буде знайдено автоматично</i>')
+        fl.addRow('Файл зв\'язків:', self._links_status)
+
+        self._delim_combo = QComboBox()
+        self._delim_combo.addItems(['Кома (,)', 'Крапка з комою (;)', 'Табуляція (\\t)'])
+        self._delim_combo.currentIndexChanged.connect(self._on_delimiter_changed)
+        fl.addRow('Роздільник:', self._delim_combo)
+
+        hint = QLabel(
+            'Обов\'язкові стовпці nodes.csv: <b>id, title</b><br>'
+            'Обов\'язкові стовпці links.csv: <b>source_id, target_id</b>'
+        )
+        hint.setWordWrap(True)
+        fl.addRow(hint)
+        return w
+
+    def _build_page_mapping(self) -> QWidget:
+        inner = QWidget()
+        vl = QVBoxLayout(inner)
+
+        vl.addWidget(QLabel('<b>Маппінг стовпців вузлів (nodes.csv)</b>'))
+        nf = QFormLayout()
+        for field, label in [
+            ('id', 'Ідентифікатор *'), ('title', 'Назва *'),
+            ('type', 'Тип вузла'), ('note', 'Примітка'),
+            ('date', 'Дата'), ('color', 'Колір (#hex)'),
+            ('x', 'X координата'), ('y', 'Y координата'),
+        ]:
+            cb = QComboBox()
+            self._node_map[field] = cb
+            nf.addRow(label + ':', cb)
+        vl.addLayout(nf)
+
+        vl.addSpacing(12)
+        vl.addWidget(QLabel('<b>Маппінг стовпців зв\'язків (links.csv)</b>'))
+        lf = QFormLayout()
+        for field, label in [
+            ('source_id', 'ID джерела *'), ('target_id', 'ID цілі *'),
+            ('label', 'Підпис'), ('direction', 'Напрямок'),
+            ('strength', 'Міцність (Confirmed/Unconfirmed/Tentative)'),
+            ('date_time', 'Дата/час'), ('source_reference', 'Джерело'),
+            ('weighting_value', 'Вага'), ('note', 'Примітка'),
+        ]:
+            cb = QComboBox()
+            self._link_map[field] = cb
+            lf.addRow(label + ':', cb)
+        vl.addLayout(lf)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(inner)
+        page = QWidget()
+        pl = QVBoxLayout(page)
+        pl.addWidget(scroll)
+        return page
+
+    def _build_page_preview(self) -> QWidget:
+        w = QWidget()
+        vl = QVBoxLayout(w)
+        vl.addWidget(QLabel('<b>Попередній перегляд nodes.csv (перші 5 рядків)</b>'))
+        self._preview_table = QTableWidget()
+        self._preview_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        vl.addWidget(self._preview_table, 1)
+        vl.addWidget(QLabel('<b>Статус валідації:</b>'))
+        self._status_label = QLabel('—')
+        self._status_label.setWordWrap(True)
+        vl.addWidget(self._status_label)
+        vl.addWidget(self._auto_layout_cb)
+        return w
+
+    # ---- navigation ----
+
+    def _go_next(self) -> None:
+        page = self._stack.currentIndex()
+        if page == 0:
+            if not self._nodes_path:
+                QMessageBox.warning(self, 'Помилка', 'Виберіть файл вузлів.')
+                return
+            self._update_mapping_combos()
+        elif page == 1:
+            self._refresh_preview()
+        self._stack.setCurrentIndex(page + 1)
+        self._update_nav()
+
+    def _go_back(self) -> None:
+        self._stack.setCurrentIndex(self._stack.currentIndex() - 1)
+        self._update_nav()
+
+    def _update_nav(self) -> None:
+        idx = self._stack.currentIndex()
+        self._btn_back.setEnabled(idx > 0)
+        self._btn_next.setVisible(idx < 2)
+        self._btn_import.setVisible(idx == 2)
+        self._step_label.setText(f'Крок {idx + 1} з 3')
+
+    # ---- file page helpers ----
+
+    def _browse_nodes(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, 'Відкрити nodes.csv', '', 'CSV файли (*.csv *.tsv *.txt)'
+        )
+        if path:
+            self._nodes_edit.setText(path)
+
+    def _on_nodes_path_changed(self, text: str) -> None:
+        self._nodes_path = text
+        lp = Path(text).parent / 'links.csv'
+        if lp.is_file():
+            self._links_status.setText(f'<i>✓ Знайдено: {lp.name}</i>')
+        else:
+            self._links_status.setText('<i>links.csv не знайдено — тільки вузли</i>')
+
+    def _on_delimiter_changed(self, idx: int) -> None:
+        self._delimiter = [',', ';', '\t'][idx]
+
+    def _read_headers(self, path: str) -> list:
+        try:
+            with open(path, newline='', encoding='utf-8-sig') as fh:
+                r = csv.DictReader(fh, delimiter=self._delimiter)
+                return list(r.fieldnames or [])
+        except Exception:
+            return []
+
+    # ---- mapping page helpers ----
+
+    def _update_mapping_combos(self) -> None:
+        NONE = '(не використовувати)'
+        nc = self._read_headers(self._nodes_path)
+        self._node_columns = nc
+        lp = str(Path(self._nodes_path).parent / 'links.csv')
+        lc = self._read_headers(lp)
+        self._link_columns = lc
+
+        def fill(combos: dict, cols: list, required: set) -> None:
+            for field, cb in combos.items():
+                cb.clear()
+                if field not in required:
+                    cb.addItem(NONE)
+                for col in cols:
+                    cb.addItem(col)
+                match = next((c for c in cols if c.lower() == field.lower()), None)
+                if match:
+                    cb.setCurrentText(match)
+
+        fill(self._node_map, nc, {'id', 'title'})
+        fill(self._link_map, lc, {'source_id', 'target_id'})
+
+    # ---- preview page helpers ----
+
+    def _refresh_preview(self) -> None:
+        NONE = '(не використовувати)'
+        try:
+            rows_data: list = []
+            headers: list = []
+            with open(self._nodes_path, newline='', encoding='utf-8-sig') as fh:
+                reader = csv.DictReader(fh, delimiter=self._delimiter)
+                headers = list(reader.fieldnames or [])
+                for i, row in enumerate(reader):
+                    if i >= 5:
+                        break
+                    rows_data.append([row.get(h, '') for h in headers])
+
+            self._preview_table.setColumnCount(len(headers))
+            self._preview_table.setRowCount(len(rows_data))
+            self._preview_table.setHorizontalHeaderLabels(headers)
+            for r, row in enumerate(rows_data):
+                for c, val in enumerate(row):
+                    self._preview_table.setItem(r, c, QTableWidgetItem(val))
+            self._preview_table.resizeColumnsToContents()
+
+            issues: list = []
+            id_c = self._node_map['id'].currentText()
+            ti_c = self._node_map['title'].currentText()
+            if not id_c or id_c == NONE:
+                issues.append('⚠ Не вибрано id для вузлів')
+            if not ti_c or ti_c == NONE:
+                issues.append('⚠ Не вибрано title для вузлів')
+            if self._link_columns:
+                sc = self._link_map['source_id'].currentText()
+                tc = self._link_map['target_id'].currentText()
+                if not sc or sc == NONE:
+                    issues.append('⚠ Не вибрано source_id для зв\'язків')
+                if not tc or tc == NONE:
+                    issues.append('⚠ Не вибрано target_id для зв\'язків')
+
+            if issues:
+                self._status_label.setText('\n'.join(issues))
+                self._status_label.setStyleSheet('color: orange;')
+            else:
+                n = len(rows_data)
+                self._status_label.setText(f'✓ Готово — показано {n} рядків')
+                self._status_label.setStyleSheet('color: green;')
+        except Exception as exc:
+            self._status_label.setText(f'Помилка: {exc}')
+            self._status_label.setStyleSheet('color: red;')
+
+    # ---- result ----
+
+    def get_mapping(self) -> dict:
+        NONE = '(не використовувати)'
+
+        def clean(t: str) -> Optional[str]:
+            return t if t and t != NONE else None
+
+        return {
+            'nodes_path': self._nodes_path,
+            'delimiter': self._delimiter,
+            'auto_layout': self._auto_layout_cb.isChecked(),
+            'node_map': {f: clean(cb.currentText()) for f, cb in self._node_map.items()},
+            'link_map': {f: clean(cb.currentText()) for f, cb in self._link_map.items()},
+        }
+
+
+# =============================================================================
+# P3.4 — RibbonBar — стрічковий тулбар з вкладками
+# =============================================================================
+
+class RibbonBar(QWidget):
+    """Tabbed ribbon toolbar: Home / Analyze / Style / Arrange / Publish."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._tabs = QTabWidget()
+        self._tabs.setTabPosition(QTabWidget.TabPosition.North)
+        self._tabs.setMaximumHeight(96)
+        self._tabs.setStyleSheet('QTabWidget::pane { border: none; margin: 0; }')
+        vl = QVBoxLayout(self)
+        vl.setContentsMargins(0, 0, 0, 0)
+        vl.addWidget(self._tabs)
+
+    def add_tab(self, name: str) -> QHBoxLayout:
+        container = QWidget()
+        lay = QHBoxLayout(container)
+        lay.setContentsMargins(4, 2, 4, 2)
+        lay.setSpacing(4)
+        self._tabs.addTab(container, name)
+        return lay
+
+    def add_group(self, lay: QHBoxLayout, title: str, actions: list) -> None:
+        box = QGroupBox(title)
+        gl = QHBoxLayout(box)
+        gl.setContentsMargins(4, 0, 4, 4)
+        gl.setSpacing(2)
+        for a in actions:
+            if a is None:
+                sep = QFrame()
+                sep.setFrameShape(QFrame.Shape.VLine)
+                gl.addWidget(sep)
+            else:
+                btn = QToolButton()
+                btn.setDefaultAction(a)
+                btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBelowIcon)
+                gl.addWidget(btn)
+        lay.addWidget(box)
+
+    @staticmethod
+    def finalize(lay: QHBoxLayout) -> None:
+        lay.addStretch(1)
+
+
+# =============================================================================
+# P3.3 — TimelinePanel — хронологічний перегляд подій
+# =============================================================================
+
+class TimelinePanel(QWidget):
+    """Dock-панель: відображає вузли і зв'язки з датами на часовій шкалі."""
+
+    _DATE_FMTS = [
+        '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d',
+        '%d.%m.%Y %H:%M', '%d.%m.%Y', '%d/%m/%Y', '%m/%d/%Y',
+    ]
+
+    # Кольори для типів вузлів
+    _TYPE_COLORS = {
+        'Person': '#4CAF50', 'Organization': '#2196F3', 'Phone': '#FF9800',
+        'Event': '#E91E63', 'Motor Vehicle': '#9C27B0', 'Document': '#607D8B',
+        'Bank Account': '#00BCD4', 'Location': '#795548', 'Link': '#F44336',
+    }
+
+    def __init__(self, canvas: 'DiagramCanvas', parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._canvas = canvas
+
+        self._scene = QGraphicsScene(self)
+        self._view = QGraphicsView(self._scene)
+        self._view.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self._view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self._view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        self._start_edit = QLineEdit()
+        self._start_edit.setPlaceholderText('Від (РРРР-ММ-ДД)')
+        self._start_edit.setMaximumWidth(140)
+        self._end_edit = QLineEdit()
+        self._end_edit.setPlaceholderText('До (РРРР-ММ-ДД)')
+        self._end_edit.setMaximumWidth(140)
+        refresh_btn = QPushButton('Оновити')
+        refresh_btn.clicked.connect(self.refresh)
+
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel('Від:'))
+        filter_row.addWidget(self._start_edit)
+        filter_row.addWidget(QLabel('До:'))
+        filter_row.addWidget(self._end_edit)
+        filter_row.addWidget(refresh_btn)
+        filter_row.addStretch(1)
+
+        root = QVBoxLayout(self)
+        root.addLayout(filter_row)
+        root.addWidget(self._view, 1)
+
+    # ---- helpers ----
+
+    def _parse_date(self, s: str) -> Optional[datetime]:
+        if not s:
+            return None
+        s = s.strip()
+        for fmt in self._DATE_FMTS:
+            try:
+                return datetime.strptime(s, fmt)
+            except ValueError:
+                pass
+        return None
+
+    # ---- main rebuild ----
+
+    def refresh(self) -> None:
+        self._scene.clear()
+
+        filter_start = self._parse_date(self._start_edit.text())
+        filter_end = self._parse_date(self._end_edit.text())
+
+        # Збираємо всі датовані елементи: (datetime, label, entity_type)
+        items: list = []
+
+        for node_item in self._canvas._node_items.values():
+            node = node_item.node
+            dt = self._parse_date(getattr(node, 'date', ''))
+            if dt is None:
+                continue
+            if filter_start and dt < filter_start:
+                continue
+            if filter_end and dt > filter_end:
+                continue
+            items.append((dt, node.title or node.type, node.type))
+
+        for link_item in self._canvas._link_items.values():
+            link = link_item.link
+            dt = self._parse_date(getattr(link, 'date_time', ''))
+            if dt is None:
+                dt = self._parse_date(getattr(link, 'start_date_time', ''))
+            if dt is None:
+                continue
+            if filter_start and dt < filter_start:
+                continue
+            if filter_end and dt > filter_end:
+                continue
+            lbl = getattr(link, 'label', '') or 'Зв\'язок'
+            items.append((dt, lbl, 'Link'))
+
+        if not items:
+            msg = self._scene.addText('Немає елементів із датами')
+            msg.setDefaultTextColor(QColor('#888888'))
+            self._scene.setSceneRect(0, 0, 400, 60)
+            return
+
+        items.sort(key=lambda x: x[0])
+        min_dt = items[0][0]
+        max_dt = items[-1][0]
+        span = max(1.0, (max_dt - min_dt).total_seconds())
+
+        # Константи розмітки
+        MARGIN_L = 130
+        MARGIN_T = 36
+        TL_W = 860
+        LANE_H = 44
+        DOT_R = 7
+
+        # Смуги за типами
+        type_order = list(dict.fromkeys(t for _, _, t in items))
+        lane_y = {t: MARGIN_T + i * LANE_H for i, t in enumerate(type_order)}
+
+        # Вісь часу
+        axis_y = MARGIN_T - 14
+        axis_pen = QPen(QColor('#444444'), 1)
+        self._scene.addLine(MARGIN_L, axis_y, MARGIN_L + TL_W, axis_y, axis_pen)
+
+        # Підписи смуг + горизонтальні лінії
+        lane_pen = QPen(QColor('#e0e0e0'), 1, Qt.PenStyle.DashLine)
+        for t, y in lane_y.items():
+            lbl = self._scene.addText(t)
+            lbl.setDefaultTextColor(QColor('#555555'))
+            font = QFont()
+            font.setPointSize(8)
+            lbl.setFont(font)
+            lbl.setPos(2, y - 11)
+            self._scene.addLine(MARGIN_L, y, MARGIN_L + TL_W, y, lane_pen)
+
+        # Елементи
+        tick_pen = QPen(QColor('#333333'), 1)
+        for dt, label, etype in items:
+            frac = (dt - min_dt).total_seconds() / span
+            x = MARGIN_L + frac * TL_W
+            y = lane_y.get(etype, MARGIN_T)
+            color = QColor(self._TYPE_COLORS.get(etype, '#9E9E9E'))
+
+            # Тік на осі
+            self._scene.addLine(x, axis_y - 5, x, axis_y + 5, tick_pen)
+
+            # Крапка події
+            self._scene.addEllipse(
+                x - DOT_R, y - DOT_R, DOT_R * 2, DOT_R * 2,
+                QPen(color.darker(130), 1), QBrush(color)
+            )
+
+            # Підпис
+            item_font = QFont()
+            item_font.setPointSize(7)
+            lbl_item = self._scene.addText(label[:22])
+            lbl_item.setDefaultTextColor(QColor('#222222'))
+            lbl_item.setFont(item_font)
+            lbl_item.setPos(x - 28, y - DOT_R - 18)
+
+            # Дата під віссю
+            date_font = QFont()
+            date_font.setPointSize(6)
+            date_item = self._scene.addText(dt.strftime('%d.%m.%y'))
+            date_item.setDefaultTextColor(QColor('#999999'))
+            date_item.setFont(date_font)
+            date_item.setPos(x - 18, axis_y + 6)
+
+        total_h = MARGIN_T + len(type_order) * LANE_H + 30
+        self._scene.setSceneRect(0, 0, MARGIN_L + TL_W + 50, total_h)
+        self._view.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+
+
 # ---------------------------------------------------------------------------
 # Головне вікно програми
 # ---------------------------------------------------------------------------
@@ -3839,7 +4338,7 @@ class MainWindow(QMainWindow):
 
         # Побудова UI
         self._create_panels()
-        self._create_toolbar()
+        self._create_ribbon()
         self._create_menubar()
         self._connect_canvas_signals()
 
@@ -3918,42 +4417,24 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._minimap_dock)
         self._minimap_dock.hide()
 
+        # --- P3.3 Хронологія ---
+        self._timeline_panel = TimelinePanel(self.canvas, self)
+        self._timeline_dock = QDockWidget('Хронологія', self)
+        self._timeline_dock.setWidget(self._timeline_panel)
+        self._timeline_dock.setAllowedAreas(
+            Qt.DockWidgetArea.BottomDockWidgetArea | Qt.DockWidgetArea.TopDockWidgetArea
+        )
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._timeline_dock)
+        self._timeline_dock.hide()
+
     # ==================================================================
     # Панель інструментів
     # ==================================================================
 
-    def _create_toolbar(self) -> None:
-        """Створює основну панель інструментів."""
-        toolbar = QToolBar('Основний', self)
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
+    def _create_ribbon(self) -> None:
+        """Створює ribbon-toolbar з вкладками Home/Analyze/Style/Arrange/Publish."""
 
-        # Файлові операції
-        act_new = QAction('Новий', self)
-        act_new.setShortcut(QKeySequence.StandardKey.New)
-        act_new.triggered.connect(self._action_new)
-        toolbar.addAction(act_new)
-
-        act_open = QAction('Відкрити', self)
-        act_open.setShortcut(QKeySequence.StandardKey.Open)
-        act_open.triggered.connect(self._action_open)
-        toolbar.addAction(act_open)
-
-        act_save = QAction('Зберегти', self)
-        act_save.setShortcut(QKeySequence.StandardKey.Save)
-        act_save.triggered.connect(self._action_save)
-        toolbar.addAction(act_save)
-
-        toolbar.addSeparator()
-
-        # Додавання вузла
-        act_add_node = QAction('Додати вузол', self)
-        act_add_node.triggered.connect(self._action_add_node)
-        toolbar.addAction(act_add_node)
-
-        toolbar.addSeparator()
-
-        # Інструменти: вибір / зв'язок (взаємовиключні)
+        # ---- Режимні actions (взаємовиключні) ----
         mode_group = QActionGroup(self)
 
         self._act_mode_select = QAction('Вибір', self)
@@ -3961,89 +4442,131 @@ class MainWindow(QMainWindow):
         self._act_mode_select.setChecked(True)
         self._act_mode_select.triggered.connect(self._action_set_mode_select)
         mode_group.addAction(self._act_mode_select)
-        toolbar.addAction(self._act_mode_select)
 
         self._act_mode_link = QAction("Зв'язок", self)
         self._act_mode_link.setCheckable(True)
         self._act_mode_link.triggered.connect(self._action_set_mode_link)
         mode_group.addAction(self._act_mode_link)
-        toolbar.addAction(self._act_mode_link)
 
-        toolbar.addSeparator()
-
-        # Shape Tools (ті ж mode_group — тільки один режим активний одночасно)
         self._act_mode_line = QAction('Лінія', self)
         self._act_mode_line.setCheckable(True)
         self._act_mode_line.triggered.connect(self._action_set_mode_line)
         mode_group.addAction(self._act_mode_line)
-        toolbar.addAction(self._act_mode_line)
 
         self._act_mode_circle = QAction('Коло', self)
         self._act_mode_circle.setCheckable(True)
         self._act_mode_circle.triggered.connect(self._action_set_mode_circle)
         mode_group.addAction(self._act_mode_circle)
-        toolbar.addAction(self._act_mode_circle)
 
         self._act_mode_rect = QAction('Прямокутник', self)
         self._act_mode_rect.setCheckable(True)
         self._act_mode_rect.triggered.connect(self._action_set_mode_rect)
         mode_group.addAction(self._act_mode_rect)
-        toolbar.addAction(self._act_mode_rect)
 
         self._act_mode_text = QAction('Текст', self)
         self._act_mode_text.setCheckable(True)
         self._act_mode_text.triggered.connect(self._action_set_mode_text)
         mode_group.addAction(self._act_mode_text)
-        toolbar.addAction(self._act_mode_text)
 
-        toolbar.addSeparator()
-
-        # Видалення
-        act_delete = QAction('Видалити', self)
-        act_delete.setShortcut(QKeySequence.StandardKey.Delete)
-        act_delete.triggered.connect(self._action_delete)
-        toolbar.addAction(act_delete)
-
-        toolbar.addSeparator()
-
-        # Масштаб
-        act_zoom_in = QAction('Збільшити', self)
-        act_zoom_in.triggered.connect(self.canvas.zoom_in)
-        toolbar.addAction(act_zoom_in)
-
-        act_zoom_out = QAction('Зменшити', self)
-        act_zoom_out.triggered.connect(self.canvas.zoom_out)
-        toolbar.addAction(act_zoom_out)
-
-        act_fit = QAction('За розміром', self)
-        act_fit.triggered.connect(self.canvas.fit_to_screen)
-        toolbar.addAction(act_fit)
-
-        # Сітка (перемикач)
+        # ---- Grid / Snap (checkable) ----
         self._act_grid = QAction('Сітка', self)
         self._act_grid.setCheckable(True)
         self._act_grid.setChecked(self.canvas.get_grid_enabled())
         self._act_grid.triggered.connect(self.canvas.toggle_grid)
-        toolbar.addAction(self._act_grid)
 
-        toolbar.addSeparator()
+        self._act_snap = QAction("Прив'язка", self)
+        self._act_snap.setCheckable(True)
+        self._act_snap.triggered.connect(self.canvas.toggle_snap_to_grid)
 
-        # Експорт
-        act_png = QAction('PNG', self)
-        act_png.triggered.connect(self._action_export_png)
-        toolbar.addAction(act_png)
+        # ---- Всі інші actions ----
+        def _a(text, shortcut=None, slot=None) -> QAction:
+            a = QAction(text, self)
+            if shortcut:
+                a.setShortcut(QKeySequence(shortcut))
+            if slot:
+                a.triggered.connect(slot)
+            return a
 
-        act_pdf = QAction('PDF', self)
-        act_pdf.triggered.connect(self._action_export_pdf)
-        toolbar.addAction(act_pdf)
+        act_new   = _a('Новий',    'Ctrl+N', self._action_new)
+        act_open  = _a('Відкрити', 'Ctrl+O', self._action_open)
+        act_save  = _a('Зберегти', 'Ctrl+S', self._action_save)
+        act_save_as = _a('Зберегти як', 'Ctrl+Shift+S', self._action_save_as)
 
-        toolbar.addSeparator()
+        act_undo = self.undo_stack.createUndoAction(self, 'Скасувати')
+        act_undo.setShortcut(QKeySequence.StandardKey.Undo)
+        act_redo = self.undo_stack.createRedoAction(self, 'Повторити')
+        act_redo.setShortcut(QKeySequence('Ctrl+Shift+Z'))
 
-        # Пошук
-        act_search = QAction('Пошук', self)
-        act_search.setShortcut(QKeySequence('Ctrl+F'))
-        act_search.triggered.connect(self._action_toggle_search)
-        toolbar.addAction(act_search)
+        act_delete    = _a('Видалити',  'Delete',     self._action_delete)
+        act_duplicate = _a('Дублювати', 'Ctrl+D',     self._action_duplicate)
+        act_add_node  = _a('Додати вузол', slot=self._action_add_node)
+
+        act_zoom_in  = _a('Збільшити', slot=self.canvas.zoom_in)
+        act_zoom_out = _a('Зменшити',  slot=self.canvas.zoom_out)
+        act_fit      = _a('За розміром', 'Ctrl+0', self.canvas.fit_to_screen)
+
+        act_layout_circular  = _a('Circular',  slot=self.canvas.auto_layout_circular)
+        act_layout_hierarchy = _a('Hierarchy', slot=self.canvas.auto_layout_hierarchy)
+        act_layout_peacock   = _a('Peacock',   slot=self.canvas.auto_layout_peacock)
+        act_layout_grid      = _a('По сітці',  slot=self.canvas.auto_layout_grid)
+
+        act_search       = _a('Пошук',           'Ctrl+F',       self._action_toggle_search)
+        act_filter       = _a('Фільтр',           slot=self._action_filter)
+        act_visual_srch  = _a('Візуальний пошук', 'Ctrl+Alt+F',
+                               lambda: self._visual_search_dock.setVisible(
+                                   not self._visual_search_dock.isVisible()))
+        act_find_path    = _a('Знайти шлях',      'Ctrl+Shift+F', self._action_find_path)
+        act_show_all     = _a('Показати всі',     slot=self.canvas.show_all_nodes)
+        act_timeline     = _a('Хронологія',       'Ctrl+T',
+                               lambda: self._timeline_dock.setVisible(
+                                   not self._timeline_dock.isVisible()))
+
+        act_png   = _a('PNG',  slot=self._action_export_png)
+        act_pdf   = _a('PDF',  slot=self._action_export_pdf)
+        act_print = _a('Друк', slot=self._action_print_preview)
+        act_csv   = _a('Імпорт CSV', slot=self._action_import_csv)
+
+        # ---- Будуємо ribbon ----
+        ribbon = RibbonBar(self)
+
+        home = ribbon.add_tab('Home')
+        ribbon.add_group(home, 'Файл', [act_new, act_open, act_save, act_save_as])
+        ribbon.add_group(home, 'Редагування', [act_undo, act_redo, act_delete, act_duplicate])
+        ribbon.add_group(home, 'Вузол', [act_add_node])
+        ribbon.finalize(home)
+
+        analyze = ribbon.add_tab('Analyze')
+        ribbon.add_group(analyze, 'Пошук', [act_search, act_visual_srch, act_find_path])
+        ribbon.add_group(analyze, 'Фільтр', [act_filter, act_show_all])
+        ribbon.add_group(analyze, 'Хронологія', [act_timeline])
+        ribbon.finalize(analyze)
+
+        style = ribbon.add_tab('Style')
+        ribbon.add_group(style, 'Режим', [self._act_mode_select, self._act_mode_link])
+        ribbon.add_group(style, 'Фігури',
+                         [self._act_mode_line, self._act_mode_circle,
+                          self._act_mode_rect, self._act_mode_text])
+        ribbon.finalize(style)
+
+        arrange = ribbon.add_tab('Arrange')
+        ribbon.add_group(arrange, 'Розміщення',
+                         [act_layout_circular, act_layout_hierarchy,
+                          act_layout_peacock, act_layout_grid])
+        ribbon.add_group(arrange, 'Вигляд',
+                         [self._act_grid, self._act_snap, act_zoom_in, act_zoom_out, act_fit])
+        ribbon.finalize(arrange)
+
+        publish = ribbon.add_tab('Publish')
+        ribbon.add_group(publish, 'Експорт', [act_png, act_pdf, act_print])
+        ribbon.add_group(publish, 'Імпорт', [act_csv])
+        ribbon.finalize(publish)
+
+        # Вбудовуємо ribbon у QToolBar
+        ribbon_tb = QToolBar('Ribbon', self)
+        ribbon_tb.setMovable(False)
+        ribbon_tb.setFloatable(False)
+        ribbon_tb.addWidget(ribbon)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, ribbon_tb)
 
     # ==================================================================
     # Меню
@@ -4184,6 +4707,13 @@ class MainWindow(QMainWindow):
         act_minimap.setCheckable(True)
         act_minimap.triggered.connect(self._on_minimap_toggle)
         view_menu.addAction(act_minimap)
+
+        act_timeline_menu = QAction('Хронологія', self)
+        act_timeline_menu.setShortcut(QKeySequence('Ctrl+T'))
+        act_timeline_menu.triggered.connect(
+            lambda: self._timeline_dock.setVisible(not self._timeline_dock.isVisible())
+        )
+        view_menu.addAction(act_timeline_menu)
 
         view_menu.addSeparator()
 
@@ -4374,16 +4904,23 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, 'Помилка', 'Не вдалося зберегти файл.')
 
     def _action_import_csv(self) -> None:
-        """Імпортує вузли та зв'язки з CSV-файлу."""
-        filepath, _ = QFileDialog.getOpenFileName(
-            self, 'Імпорт CSV', '', 'CSV файли (*.csv)'
-        )
-        if not filepath:
+        """Відкриває майстер імпорту CSV та виконує імпорт."""
+        wizard = ImportWizard(self)
+        if wizard.exec() != QDialog.DialogCode.Accepted:
             return
-        n_nodes, n_links, err = import_from_csv(self.canvas, filepath)
+        mapping = wizard.get_mapping()
+        n_nodes, n_links, err = import_from_csv(
+            self.canvas,
+            mapping['nodes_path'],
+            delimiter=mapping['delimiter'],
+            node_map=mapping['node_map'],
+            link_map=mapping['link_map'],
+        )
+        if mapping['auto_layout']:
+            self.canvas.auto_layout_hierarchy()
         msg = f'Імпортовано вузлів: {n_nodes}, зв\'язків: {n_links}'
         if err:
-            msg += f'\n\nПопередження: {err}'
+            msg += f'\n\nПопередження:\n{err}'
         QMessageBox.information(self, 'Імпорт CSV', msg)
 
     def _action_export_png(self) -> None:

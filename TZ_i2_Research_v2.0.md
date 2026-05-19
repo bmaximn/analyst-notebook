@@ -398,10 +398,10 @@ Link =
 | 12 | Entity Type Registry + `Bank Account` / `Motor Vehicle` | P2 | ⏳ |
 | 13 | Link label show/hide/collision polish | P3 | ✅ базово готово |
 | 14 | Show-connected -> Find Linked depth/direction | P3 | ✅ базово готово |
-| 15 | Timeline View | P3 | ⏳ |
-| 16 | Ribbon-like navigation cleanup | P3 | ⏳ |
-| 17 | Import/export polish | P3 | ⏳ |
-| 18 | Рефакторинг `main.py` | P3 | ⏳ |
+| 15 | Timeline View | P3 | ✅ |
+| 16 | Ribbon-like navigation cleanup | P3 | ✅ |
+| 17 | Import/export polish | P3 | ✅ |
+| 18 | Рефакторинг `main.py` | P3 | ✅ |
 
 ---
 
