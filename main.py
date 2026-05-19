@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QScrollArea, QSizePolicy, QStyle, QStyleFactory,
     QFrame, QSplitter, QAbstractScrollArea, QStackedWidget, QInputDialog,
     QGraphicsLineItem, QGraphicsEllipseItem, QGraphicsRectItem,
-    QGraphicsSimpleTextItem
+    QGraphicsSimpleTextItem, QSpinBox
 )
 from PyQt6.QtCore import (
     Qt, QRectF, QPointF, QSizeF, QTimer, QObject, pyqtSignal, QLineF, QSize
@@ -21,7 +21,7 @@ from PyQt6.QtGui import (
     QPainterPathStroker, QPolygonF, QCursor, QPageSize, QPageLayout,
     QUndoStack, QUndoCommand, QPdfWriter
 )
-from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
+from PyQt6.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewDialog
 
 # ---------------------------------------------------------------------------
 # Константи програми
@@ -173,6 +173,8 @@ class Link:
         direction: str = 'source_to_target',
         note: str = '',
         link_uuid: Optional[str] = None,
+        color: str = '#555555',
+        width: int = 2,
     ) -> None:
         self.uuid: str = link_uuid if link_uuid else str(uuid.uuid4())
         self.source_uuid: str = source_uuid
@@ -181,6 +183,8 @@ class Link:
         self.line_type: str = line_type
         self.direction: str = direction
         self.note: str = note
+        self.color: str = color
+        self.width: int = width
         now = datetime.now().isoformat()
         self.created_at: str = now
         self.updated_at: str = now
@@ -199,6 +203,8 @@ class Link:
             'line_type': self.line_type,
             'direction': self.direction,
             'note': self.note,
+            'color': self.color,
+            'width': self.width,
             'created_at': self.created_at,
             'updated_at': self.updated_at,
         }
@@ -219,6 +225,8 @@ class Link:
             link.created_at = d['created_at']
         if 'updated_at' in d:
             link.updated_at = d['updated_at']
+        link.color = d.get('color', '#555555')
+        link.width = int(d.get('width', 2))
         return link
 
     def touch(self) -> None:
@@ -599,8 +607,12 @@ class NodeItem(QGraphicsObject):
 
     def itemChange(self, change, value):
         """Синхронізує позицію у моделі та надсилає сигнал при переміщенні."""
-        if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
-            # Оновлюємо координати в моделі
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange:
+            canvas = getattr(self, '_canvas', None)
+            if canvas is not None and canvas.get_snap_to_grid():
+                grid = 30
+                return QPointF(round(value.x() / grid) * grid, round(value.y() / grid) * grid)
+        elif change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
             self.node.x = self.pos().x()
             self.node.y = self.pos().y()
             self.position_changed.emit(self.node.uuid)
@@ -629,6 +641,9 @@ class NodeItem(QGraphicsObject):
         menu.addSeparator()
         action_color = menu.addAction('Змінити колір')
         menu.addSeparator()
+        action_show_connected = menu.addAction("Показати тільки пов'язані")
+        action_show_all = menu.addAction('Показати всі')
+        menu.addSeparator()
         action_delete = menu.addAction('Видалити')
 
         chosen = menu.exec(event.screenPos())
@@ -640,11 +655,18 @@ class NodeItem(QGraphicsObject):
         elif chosen == action_duplicate:
             self.duplicate_requested.emit(self.node.uuid)
         elif chosen == action_color:
-            # Відкриваємо діалог вибору кольору з поточним кольором вузла
             current_color = QColor(self.node.color)
             new_color = QColorDialog.getColor(current_color, None, 'Виберіть колір вузла')
             if new_color.isValid():
                 self.color_change_requested.emit(self.node.uuid, new_color.name())
+        elif chosen == action_show_connected:
+            canvas = getattr(self, '_canvas', None)
+            if canvas is not None:
+                canvas.show_only_connected(self.node.uuid)
+        elif chosen == action_show_all:
+            canvas = getattr(self, '_canvas', None)
+            if canvas is not None:
+                canvas.show_all_nodes()
 
     # ------------------------------------------------------------------
     # Подвійний клік — відкрити редактор
@@ -764,15 +786,17 @@ class LinkItem(QGraphicsObject):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
-        line_color = QColor('#2196F3') if selected else QColor('#555555')
+        base_color = QColor(getattr(self.link, 'color', '#555555'))
+        line_color = QColor('#2196F3') if selected else base_color
+        lw = getattr(self.link, 'width', 2)
 
         line_type = self.link.line_type  # тип лінії
 
         # --- Формуємо перо залежно від типу лінії ---
         if line_type == 'dashed':
-            pen = QPen(line_color, 2, Qt.PenStyle.DashLine)
+            pen = QPen(line_color, lw, Qt.PenStyle.DashLine)
         else:
-            pen = QPen(line_color, 2, Qt.PenStyle.SolidLine)
+            pen = QPen(line_color, lw, Qt.PenStyle.SolidLine)
 
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
 
@@ -859,21 +883,19 @@ class LinkItem(QGraphicsObject):
         painter.drawPolygon(arrow_polygon)
 
     def _draw_label(self, painter: QPainter):
-        """Малює підпис зв'язку на середині лінії з білим фоном."""
+        """Малює підпис зв'язку на середині лінії з фоном."""
         label_font = QFont()
-        label_font.setPointSize(8)
+        label_font.setPointSize(9)
         painter.setFont(label_font)
 
         fm = painter.fontMetrics()
         text_rect = fm.boundingRect(self.link.label)
 
-        # Центр лінії
         mid = self._line.pointAt(0.5)
         text_w = text_rect.width()
         text_h = text_rect.height()
 
-        pad = 3
-        # Прямокутник фону
+        pad = 4
         bg_rect = QRectF(
             mid.x() - text_w / 2 - pad,
             mid.y() - text_h / 2 - pad,
@@ -881,12 +903,11 @@ class LinkItem(QGraphicsObject):
             text_h + 2 * pad,
         )
 
-        # Білий фон
-        painter.setPen(Qt.PenStyle.NoPen)
+        # Білий фон з тонкою рамкою
+        painter.setPen(QPen(QColor('#cccccc'), 1))
         painter.setBrush(QBrush(QColor('#ffffff')))
-        painter.drawRect(bg_rect)
+        painter.drawRoundedRect(bg_rect, 3, 3)
 
-        # Текст підпису
         painter.setPen(QPen(QColor('#222222')))
         painter.drawText(bg_rect, Qt.AlignmentFlag.AlignCenter, self.link.label)
 
@@ -915,6 +936,70 @@ class LinkItem(QGraphicsObject):
         """Відкриває редактор зв'язку при подвійному кліку."""
         self.edit_requested.emit(self.link.uuid)
         super().mouseDoubleClickEvent(event)
+
+
+# =============================================================================
+# GroupItem — контейнер для групи вузлів
+# =============================================================================
+
+class GroupItem(QGraphicsRectItem):
+    """Напівпрозорий прямокутний контейнер навколо групи вузлів.
+
+    При переміщенні всі вузли-члени рухаються разом.
+    """
+
+    def __init__(self, member_items: list, label: str = '', parent=None):
+        self._member_items: list = list(member_items)
+        self._label: str = label
+
+        pad = 20
+        if member_items:
+            xs = [it.pos().x() for it in member_items]
+            ys = [it.pos().y() for it in member_items]
+            x0 = min(xs) - pad
+            y0 = min(ys) - pad - 22      # місце для підпису зверху
+            x1 = max(it.pos().x() + NODE_W for it in member_items) + pad
+            y1 = max(it.pos().y() + NODE_H for it in member_items) + pad
+            rect = QRectF(x0, y0, x1 - x0, y1 - y0)
+        else:
+            rect = QRectF(0, 0, 200, 150)
+
+        super().__init__(rect, parent)
+        self._last_pos = self.pos()
+
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
+
+        self.setBrush(QBrush(QColor(100, 150, 255, 35)))
+        self.setPen(QPen(QColor(80, 120, 220), 2, Qt.PenStyle.DashLine))
+        self.setZValue(-2)
+
+    # ------------------------------------------------------------------
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange:
+            delta = value - self._last_pos
+            self._last_pos = value
+            for it in self._member_items:
+                it.setPos(it.pos() + delta)
+        return super().itemChange(change, value)
+
+    def paint(self, painter, option, widget=None):
+        super().paint(painter, option, widget)
+        if self._label:
+            f = QFont()
+            f.setPointSize(9)
+            f.setBold(True)
+            painter.setFont(f)
+            painter.setPen(QPen(QColor(60, 100, 200)))
+            lbl_rect = QRectF(self.rect().x(), self.rect().y(), self.rect().width(), 20)
+            painter.drawText(lbl_rect, Qt.AlignmentFlag.AlignCenter, self._label)
+
+    def members(self) -> list:
+        return list(self._member_items)
+
+
 # =============================================================================
 # ЧАСТИНА 3 — DiagramCanvas, збереження/завантаження JSON, імпорт CSV,
 #              експорт PNG/PDF, автозбереження
@@ -980,6 +1065,7 @@ class DiagramCanvas(QGraphicsView):
 
         # --- Додаткові параметри ---
         self._grid_enabled: bool = True
+        self._snap_to_grid: bool = False
         self._space_pressed: bool = False
         self._pan_start: Optional[QPointF] = None
 
@@ -1011,6 +1097,7 @@ class DiagramCanvas(QGraphicsView):
         """Додає вузол до моделі й до сцени; повертає створений NodeItem."""
         self.nodes[node.uuid] = node
         item = NodeItem(node)
+        item._canvas = self
         self._scene.addItem(item)
         item.setPos(node.x, node.y)
 
@@ -1145,6 +1232,137 @@ class DiagramCanvas(QGraphicsView):
     def get_grid_enabled(self) -> bool:
         """Повертає поточний стан відображення сітки."""
         return self._grid_enabled
+
+    def toggle_snap_to_grid(self) -> None:
+        """Вмикає або вимикає прив'язку вузлів до сітки при переміщенні."""
+        self._snap_to_grid = not self._snap_to_grid
+
+    def get_snap_to_grid(self) -> bool:
+        return self._snap_to_grid
+
+    # ------------------------------------------------------------------
+    # Авто-розміщення вузлів
+    # ------------------------------------------------------------------
+
+    def auto_layout_grid(self) -> None:
+        """Розкладає всі вузли рівномірно по сітці."""
+        import math
+        nodes = list(self.nodes.values())
+        if not nodes:
+            return
+        cols = max(1, math.ceil(math.sqrt(len(nodes))))
+        spacing_x, spacing_y = 200, 150
+        for i, node in enumerate(nodes):
+            node.x = (i % cols) * spacing_x + 60
+            node.y = (i // cols) * spacing_y + 60
+            item = self.node_items.get(node.uuid)
+            if item:
+                item.setPos(node.x, node.y)
+        for li in self.link_items.values():
+            li.update_position()
+        self.mark_modified()
+        self.status_message.emit('Авто-розміщення (сітка) виконано')
+
+    def auto_layout_radial(self) -> None:
+        """Розкладає вузли радіально: найбільш пов'язаний — у центрі."""
+        import math
+        nodes = list(self.nodes.values())
+        if not nodes:
+            return
+        if len(nodes) == 1:
+            nodes[0].x, nodes[0].y = 400, 300
+            item = self.node_items.get(nodes[0].uuid)
+            if item:
+                item.setPos(400, 300)
+            for li in self.link_items.values():
+                li.update_position()
+            self.mark_modified()
+            return
+        conn = {n.uuid: 0 for n in nodes}
+        for lk in self.links.values():
+            conn[lk.source_uuid] = conn.get(lk.source_uuid, 0) + 1
+            conn[lk.target_uuid] = conn.get(lk.target_uuid, 0) + 1
+        center_uuid = max(conn, key=lambda u: conn[u])
+        cx, cy = 500, 400
+        radius = min(150 + len(nodes) * 12, 380)
+        center_node = self.nodes[center_uuid]
+        center_node.x, center_node.y = cx, cy
+        item = self.node_items.get(center_uuid)
+        if item:
+            item.setPos(cx, cy)
+        others = [n for n in nodes if n.uuid != center_uuid]
+        for i, node in enumerate(others):
+            angle = 2 * math.pi * i / len(others)
+            node.x = cx + radius * math.cos(angle)
+            node.y = cy + radius * math.sin(angle)
+            it = self.node_items.get(node.uuid)
+            if it:
+                it.setPos(node.x, node.y)
+        for li in self.link_items.values():
+            li.update_position()
+        self.mark_modified()
+        self.status_message.emit('Авто-розміщення (радіально) виконано')
+
+    # ------------------------------------------------------------------
+    # Групування вузлів
+    # ------------------------------------------------------------------
+
+    def group_selected(self) -> Optional['GroupItem']:
+        """Групує виділені вузли у напівпрозорий контейнер."""
+        items = [it for it in self._scene.selectedItems() if isinstance(it, NodeItem)]
+        if len(items) < 2:
+            self.status_message.emit('Виберіть 2 або більше вузлів для групування')
+            return None
+        label, ok = QInputDialog.getText(None, 'Назва групи', 'Введіть назву (необов\'язково):')
+        if not ok:
+            label = ''
+        group = GroupItem(items, label.strip())
+        self._scene.addItem(group)
+        self._scene.clearSelection()
+        group.setSelected(True)
+        self.mark_modified()
+        self.status_message.emit(f'Групу створено ({len(items)} вузлів)')
+        return group
+
+    def ungroup_selected(self) -> None:
+        """Видаляє виділені GroupItem зі сцени."""
+        removed = 0
+        for item in list(self._scene.selectedItems()):
+            if isinstance(item, GroupItem):
+                self._scene.removeItem(item)
+                removed += 1
+        if removed:
+            self.mark_modified()
+            self.status_message.emit(f'Розгруповано {removed} групу(и)')
+        else:
+            self.status_message.emit('Виберіть групу для розгрупування')
+
+    # ------------------------------------------------------------------
+    # Фільтр "тільки пов'язані"
+    # ------------------------------------------------------------------
+
+    def show_only_connected(self, node_uuid: str) -> None:
+        """Приховує всі вузли та зв'язки, не пов'язані з вказаним вузлом."""
+        connected = {node_uuid}
+        for lk in self.links.values():
+            if lk.source_uuid == node_uuid:
+                connected.add(lk.target_uuid)
+            elif lk.target_uuid == node_uuid:
+                connected.add(lk.source_uuid)
+        for uid, it in self.node_items.items():
+            it.setVisible(uid in connected)
+        for lu, li in self.link_items.items():
+            lk = self.links.get(lu)
+            li.setVisible(bool(lk and lk.source_uuid in connected and lk.target_uuid in connected))
+        self.status_message.emit("Показано тільки пов'язані. ПКМ → 'Показати всі' щоб скасувати.")
+
+    def show_all_nodes(self) -> None:
+        """Відновлює видимість усіх вузлів і зв'язків."""
+        for it in self.node_items.values():
+            it.setVisible(True)
+        for li in self.link_items.values():
+            li.setVisible(True)
+        self.status_message.emit('Усі елементи відображено')
 
     # ------------------------------------------------------------------
     # Малювання фону (сітка крапок)
@@ -2292,6 +2510,7 @@ class LinkDialog(QDialog):
     def __init__(self, parent=None, link: 'Link' = None) -> None:
         super().__init__(parent)
         self._link = link
+        self._link_color: str = '#555555'
         self.setWindowTitle("Редагувати зв'язок" if link else "Новий зв'язок")
         self.setMinimumWidth(380)
         self._build_ui()
@@ -2328,6 +2547,21 @@ class LinkDialog(QDialog):
             self._direction_combo.addItem(label, userData=key)
         form.addRow('Напрямок:', self._direction_combo)
 
+        # --- Колір лінії ---
+        self._link_color_btn = QPushButton()
+        self._link_color_btn.setFixedWidth(100)
+        self._link_color_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._link_color_btn.setToolTip('Клік — вибрати колір лінії')
+        self._link_color_btn.clicked.connect(self._on_pick_link_color)
+        self._refresh_link_color_btn()
+        form.addRow('Колір лінії:', self._link_color_btn)
+
+        # --- Товщина лінії ---
+        self._link_width_spin = QSpinBox()
+        self._link_width_spin.setRange(1, 5)
+        self._link_width_spin.setValue(2)
+        form.addRow('Товщина:', self._link_width_spin)
+
         # --- Примітка ---
         self._note_edit = QTextEdit()
         self._note_edit.setPlaceholderText('Довільна примітка…')
@@ -2347,6 +2581,25 @@ class LinkDialog(QDialog):
         root_layout.addWidget(buttons)
 
     # ------------------------------------------------------------------
+    # Допоміжні методи для кнопки кольору
+    # ------------------------------------------------------------------
+
+    def _refresh_link_color_btn(self) -> None:
+        c = QColor(self._link_color)
+        lum = (c.red() * 299 + c.green() * 587 + c.blue() * 114) / 1000
+        text_color = '#ffffff' if lum < 128 else '#000000'
+        self._link_color_btn.setStyleSheet(
+            f'background-color:{self._link_color}; color:{text_color}; border:1px solid #888;'
+        )
+        self._link_color_btn.setText(self._link_color)
+
+    def _on_pick_link_color(self) -> None:
+        c = QColorDialog.getColor(QColor(self._link_color), self, 'Колір лінії')
+        if c.isValid():
+            self._link_color = c.name()
+            self._refresh_link_color_btn()
+
+    # ------------------------------------------------------------------
     # Заповнення полів при редагуванні
     # ------------------------------------------------------------------
 
@@ -2363,6 +2616,9 @@ class LinkDialog(QDialog):
                 self._direction_combo.setCurrentIndex(i)
                 break
 
+        self._link_color = getattr(link, 'color', '#555555')
+        self._refresh_link_color_btn()
+        self._link_width_spin.setValue(getattr(link, 'width', 2))
         self._note_edit.setPlainText(link.note)
 
     # ------------------------------------------------------------------
@@ -2375,6 +2631,8 @@ class LinkDialog(QDialog):
             'label': self._label_edit.text().strip(),
             'line_type': self._line_type_combo.currentData(),
             'direction': self._direction_combo.currentData(),
+            'color': self._link_color,
+            'width': self._link_width_spin.value(),
             'note': self._note_edit.toPlainText().strip(),
         }
 
@@ -2399,6 +2657,7 @@ class PropertiesPanel(QWidget):
     link_edit_requested = pyqtSignal(str)   # uuid зв'язку — відкрити повний діалог
     node_inline_changed = pyqtSignal(str, str, str)   # uuid, поле, нове_значення
     link_inline_changed = pyqtSignal(str, str, str)   # uuid, поле, нове_значення
+    node_color_changed = pyqtSignal(str, str)          # uuid, new_color_hex
 
     # Індекси сторінок QStackedWidget
     _PAGE_EMPTY = 0
@@ -2507,9 +2766,13 @@ class PropertiesPanel(QWidget):
         self._node_note_edit.editing_finished.connect(self._on_note_committed)
         form.addRow('Примітка:', self._node_note_edit)
 
-        # Колір
-        self._node_color_lbl = QLabel()
-        form.addRow('Колір:', self._node_color_lbl)
+        # Колір — кнопка для швидкої зміни (2 кліки без діалогу)
+        self._node_color_btn = QPushButton()
+        self._node_color_btn.setFixedWidth(100)
+        self._node_color_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._node_color_btn.setToolTip('Клік — змінити колір вузла')
+        self._node_color_btn.clicked.connect(self._on_node_color_btn_clicked)
+        form.addRow('Колір:', self._node_color_btn)
 
         # Дата
         self._node_date_lbl = QLabel()
@@ -2622,6 +2885,15 @@ class PropertiesPanel(QWidget):
         if self._current_link_uuid:
             self.link_edit_requested.emit(self._current_link_uuid)
 
+    def _on_node_color_btn_clicked(self) -> None:
+        """Відкриває QColorDialog та надсилає сигнал зміни кольору вузла."""
+        if not self._current_node_uuid:
+            return
+        current = self._node_color_btn.property('_color') or '#4A90D9'
+        c = QColorDialog.getColor(QColor(current), self, 'Колір вузла')
+        if c.isValid():
+            self.node_color_changed.emit(self._current_node_uuid, c.name())
+
     # ------------------------------------------------------------------
     # Публічний API
     # ------------------------------------------------------------------
@@ -2668,15 +2940,16 @@ class PropertiesPanel(QWidget):
         self._node_note_orig = node.note or ''
         self._node_type_lbl.setText(NODE_TYPE_LABELS.get(node.type, node.type))
 
-        # Кольорова позначка
-        color_html = (
-            f'<span style="background-color:{node.color}; '
-            f'border:1px solid #888; border-radius:3px; '
-            f'padding:0 8px;">&nbsp;&nbsp;&nbsp;&nbsp;</span> '
-            f'<span style="color:#444;">{node.color}</span>'
+        # Кнопка кольору
+        color = node.color or '#4A90D9'
+        c = QColor(color)
+        lum = (c.red() * 299 + c.green() * 587 + c.blue() * 114) / 1000
+        text_col = '#ffffff' if lum < 128 else '#000000'
+        self._node_color_btn.setStyleSheet(
+            f'background-color:{color}; color:{text_col}; border:1px solid #888;'
         )
-        self._node_color_lbl.setText(color_html)
-        self._node_color_lbl.setTextFormat(Qt.TextFormat.RichText)
+        self._node_color_btn.setText(color)
+        self._node_color_btn.setProperty('_color', color)
 
         self._node_date_lbl.setText(node.date or '—')
         self._node_uuid_lbl.setText(node.uuid)
@@ -3159,6 +3432,10 @@ class MainWindow(QMainWindow):
         act_export_pdf.triggered.connect(self._action_export_pdf)
         file_menu.addAction(act_export_pdf)
 
+        act_print_preview = QAction('Попередній перегляд друку…', self)
+        act_print_preview.triggered.connect(self._action_print_preview)
+        file_menu.addAction(act_print_preview)
+
         file_menu.addSeparator()
 
         act_quit = QAction('Вихід', self)
@@ -3199,6 +3476,18 @@ class MainWindow(QMainWindow):
         act_deselect.triggered.connect(self._action_clear_selection)
         edit_menu.addAction(act_deselect)
 
+        edit_menu.addSeparator()
+
+        act_group = QAction('Згрупувати', self)
+        act_group.setShortcut(QKeySequence('Ctrl+G'))
+        act_group.triggered.connect(self._action_group)
+        edit_menu.addAction(act_group)
+
+        act_ungroup = QAction('Розгрупувати', self)
+        act_ungroup.setShortcut(QKeySequence('Ctrl+Shift+G'))
+        act_ungroup.triggered.connect(self._action_ungroup)
+        edit_menu.addAction(act_ungroup)
+
         # ---- Вигляд ----
         view_menu = menubar.addMenu('Вигляд')
 
@@ -3225,10 +3514,28 @@ class MainWindow(QMainWindow):
         self._menu_act_grid.triggered.connect(self.canvas.toggle_grid)
         view_menu.addAction(self._menu_act_grid)
 
+        self._menu_act_snap = QAction("Прив'язка до сітки", self)
+        self._menu_act_snap.setCheckable(True)
+        self._menu_act_snap.setChecked(False)
+        self._menu_act_snap.triggered.connect(self.canvas.toggle_snap_to_grid)
+        view_menu.addAction(self._menu_act_snap)
+
         act_minimap = QAction('Мінімапа', self)
         act_minimap.setCheckable(True)
         act_minimap.triggered.connect(self._on_minimap_toggle)
         view_menu.addAction(act_minimap)
+
+        view_menu.addSeparator()
+
+        auto_layout_menu = view_menu.addMenu('Авто-розміщення')
+
+        act_layout_grid = QAction('По сітці', self)
+        act_layout_grid.triggered.connect(self.canvas.auto_layout_grid)
+        auto_layout_menu.addAction(act_layout_grid)
+
+        act_layout_radial = QAction('Радіально', self)
+        act_layout_radial.triggered.connect(self.canvas.auto_layout_radial)
+        auto_layout_menu.addAction(act_layout_radial)
 
         # ---- Інструменти ----
         tools_menu = menubar.addMenu('Інструменти')
@@ -3294,6 +3601,7 @@ class MainWindow(QMainWindow):
         # Inline редагування в панелі
         self.properties_panel.node_inline_changed.connect(self._on_node_inline_changed)
         self.properties_panel.link_inline_changed.connect(self._on_link_inline_changed)
+        self.properties_panel.node_color_changed.connect(self._on_node_color_from_panel)
 
         # Оновлення панелі після Undo/Redo
         self.canvas.undo_stack.indexChanged.connect(self._refresh_properties)
@@ -3628,6 +3936,39 @@ class MainWindow(QMainWindow):
         self._minimap_dock.setVisible(checked)
         if checked:
             self._minimap_view._do_fit()
+
+    def _action_group(self) -> None:
+        self.canvas.group_selected()
+
+    def _action_ungroup(self) -> None:
+        self.canvas.ungroup_selected()
+
+    def _action_print_preview(self) -> None:
+        """Відкриває попередній перегляд друку."""
+        printer = QPrinter()
+        printer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+        printer.setPageOrientation(QPageLayout.Orientation.Landscape)
+        preview = QPrintPreviewDialog(printer, self)
+        preview.paintRequested.connect(self._render_for_print)
+        preview.exec()
+
+    def _render_for_print(self, printer: QPrinter) -> None:
+        painter = QPainter(printer)
+        rect = self.canvas.scene().itemsBoundingRect()
+        self.canvas.scene().render(painter, source=rect)
+        painter.end()
+
+    def _on_node_color_from_panel(self, uuid: str, color: str) -> None:
+        """Обробляє зміну кольору вузла з бічної панелі через undo-стек."""
+        node = self.canvas.nodes.get(uuid)
+        if node is None:
+            return
+        old_color = node.color
+        if old_color == color:
+            return
+        self.canvas.undo_stack.push(ColorNodeCommand(self.canvas, uuid, old_color, color))
+        if uuid in self.canvas.nodes:
+            self.properties_panel.show_node(self.canvas.nodes[uuid])
 
     def _action_about(self) -> None:
         QMessageBox.about(
