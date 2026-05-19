@@ -8,7 +8,9 @@ from PyQt6.QtWidgets import (
     QStatusBar, QMenuBar, QMenu, QFileDialog, QMessageBox, QColorDialog, QLabel,
     QPushButton, QLineEdit, QTextEdit, QComboBox, QCheckBox, QFormLayout,
     QVBoxLayout, QHBoxLayout, QScrollArea, QSizePolicy, QStyle, QStyleFactory,
-    QFrame, QSplitter, QAbstractScrollArea, QStackedWidget
+    QFrame, QSplitter, QAbstractScrollArea, QStackedWidget, QInputDialog,
+    QGraphicsLineItem, QGraphicsEllipseItem, QGraphicsRectItem,
+    QGraphicsSimpleTextItem
 )
 from PyQt6.QtCore import (
     Qt, QRectF, QPointF, QSizeF, QTimer, QObject, pyqtSignal, QLineF, QSize
@@ -17,7 +19,7 @@ from PyQt6.QtGui import (
     QPainter, QPen, QBrush, QColor, QPixmap, QImage, QFont, QFontMetrics,
     QAction, QActionGroup, QKeySequence, QTransform, QPainterPath,
     QPainterPathStroker, QPolygonF, QCursor, QPageSize, QPageLayout,
-    QUndoStack, QUndoCommand
+    QUndoStack, QUndoCommand, QPdfWriter
 )
 from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
 
@@ -450,6 +452,40 @@ class EditLinkCommand(QUndoCommand):
 
     def undo(self) -> None:
         self._apply(self.old_data)
+
+
+class AddShapeCommand(QUndoCommand):
+    """Команда: додати геометричну фігуру на сцену."""
+
+    def __init__(self, scene: 'QGraphicsScene', item: 'QGraphicsItem') -> None:
+        super().__init__('Додати фігуру')
+        self._scene = scene
+        self._item = item
+
+    def redo(self) -> None:
+        self._scene.addItem(self._item)
+
+    def undo(self) -> None:
+        self._scene.removeItem(self._item)
+
+
+class DeleteShapeCommand(QUndoCommand):
+    """Команда: видалити геометричні фігури зі сцени."""
+
+    def __init__(self, scene: 'QGraphicsScene', items: list) -> None:
+        super().__init__('Видалити фігури')
+        self._scene = scene
+        self._items = list(items)
+
+    def redo(self) -> None:
+        for item in self._items:
+            self._scene.removeItem(item)
+
+    def undo(self) -> None:
+        for item in self._items:
+            self._scene.addItem(item)
+
+
 # =============================================================================
 # ЧАСТИНА 2 — Графічні елементи: NodeItem та LinkItem
 # =============================================================================
@@ -934,9 +970,13 @@ class DiagramCanvas(QGraphicsView):
         self.is_modified: bool = False
         self.current_file: Optional[str] = None
 
-        # --- Режим взаємодії: 'select' або 'link' ---
+        # --- Режим взаємодії: 'select', 'link', або shape-режими ---
         self._mode: str = 'select'
         self._link_source_uuid: Optional[str] = None
+
+        # --- Shape Tool стан ---
+        self._shape_start: Optional[QPointF] = None
+        self._shape_preview: Optional[QGraphicsItem] = None
 
         # --- Додаткові параметри ---
         self._grid_enabled: bool = True
@@ -958,6 +998,7 @@ class DiagramCanvas(QGraphicsView):
             QGraphicsView.ViewportUpdateMode.FullViewportUpdate
         )
         self.setBackgroundBrush(QBrush(QColor('white')))
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
 
         # --- Підключення сигналу зміни виділення ---
         self._scene.selectionChanged.connect(self._on_selection_changed)
@@ -1070,16 +1111,31 @@ class DiagramCanvas(QGraphicsView):
             self.resetTransform()
 
     def set_mode(self, mode: str) -> None:
-        """Перемикає режим взаємодії: 'select' або 'link'."""
+        """Перемикає режим взаємодії."""
+        # Скасовуємо поточне малювання фігури, якщо є
+        if self._shape_preview is not None:
+            self._scene.removeItem(self._shape_preview)
+            self._shape_preview = None
+        self._shape_start = None
+
         self._mode = mode
         self._link_source_uuid = None
 
+        _shape_labels = {
+            'line': 'Лінія', 'circle': 'Коло',
+            'rect': 'Прямокутник', 'text': 'Текст',
+        }
         if mode == 'select':
             self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
             self.status_message.emit('Інструмент вибору')
         elif mode == 'link':
             self.setDragMode(QGraphicsView.DragMode.NoDrag)
             self.status_message.emit('Link Tool: виберіть перший вузол')
+        elif mode in _shape_labels:
+            self.setDragMode(QGraphicsView.DragMode.NoDrag)
+            label = _shape_labels[mode]
+            hint = 'клацніть щоб розмістити' if mode == 'text' else 'клацніть і тягніть'
+            self.status_message.emit(f'{label}: {hint}')
 
     def toggle_grid(self) -> None:
         """Вмикає або вимикає відображення сітки."""
@@ -1156,9 +1212,12 @@ class DiagramCanvas(QGraphicsView):
             self.setCursor(Qt.CursorShape.OpenHandCursor)
         elif event.key() == Qt.Key.Key_Escape:
             if self._mode == 'link':
-                # Скидаємо першу точку зв'язку — починаємо знову
                 self._link_source_uuid = None
                 self.status_message.emit('Link Tool: виберіть перший вузол')
+            elif self._shape_preview is not None:
+                self._scene.removeItem(self._shape_preview)
+                self._shape_preview = None
+                self._shape_start = None
             else:
                 self._scene.clearSelection()
         else:
@@ -1205,11 +1264,9 @@ class DiagramCanvas(QGraphicsView):
 
             if node_item is not None:
                 if self._link_source_uuid is None:
-                    # Зафіксовано перший вузол
                     self._link_source_uuid = node_item.node.uuid
                     self.status_message.emit('Link Tool: виберіть другий вузол')
                 elif node_item.node.uuid != self._link_source_uuid:
-                    # Зафіксовано другий вузол — запитуємо створення зв'язку
                     self.link_creation_requested.emit(
                         self._link_source_uuid, node_item.node.uuid
                     )
@@ -1217,10 +1274,48 @@ class DiagramCanvas(QGraphicsView):
                     self.status_message.emit('Link Tool: виберіть перший вузол')
             return
 
+        if self._mode in ('line', 'circle', 'rect', 'text') and event.button() == Qt.MouseButton.LeftButton:
+            scene_pos = self.mapToScene(event.pos())
+            self._shape_start = scene_pos
+
+            if self._mode == 'text':
+                text, ok = QInputDialog.getText(self, 'Текстова мітка', 'Введіть текст:')
+                if ok and text.strip():
+                    item = QGraphicsSimpleTextItem(text.strip())
+                    font = QFont()
+                    font.setPointSize(12)
+                    item.setFont(font)
+                    item.setPos(scene_pos)
+                    item.setFlags(
+                        QGraphicsItem.GraphicsItemFlag.ItemIsMovable |
+                        QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
+                    )
+                    item.setZValue(0.5)
+                    self.undo_stack.push(AddShapeCommand(self._scene, item))
+                    self.mark_modified()
+                self._shape_start = None
+            else:
+                pen = QPen(QColor('#555555'), 2)
+                if self._mode == 'line':
+                    preview = QGraphicsLineItem(QLineF(scene_pos, scene_pos))
+                    preview.setPen(pen)
+                elif self._mode == 'circle':
+                    preview = QGraphicsEllipseItem(QRectF(scene_pos, QSizeF(0, 0)))
+                    preview.setPen(pen)
+                    preview.setBrush(QBrush(QColor(100, 150, 255, 50)))
+                else:  # rect
+                    preview = QGraphicsRectItem(QRectF(scene_pos, QSizeF(0, 0)))
+                    preview.setPen(pen)
+                    preview.setBrush(QBrush(QColor(100, 150, 255, 50)))
+                preview.setZValue(-0.5)
+                self._shape_preview = preview
+                self._scene.addItem(preview)
+            return
+
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
-        """Прокручує вигляд, якщо активний режим перетягування."""
+        """Прокручує вигляд або оновлює preview-фігуру."""
         if self._pan_start is not None:
             delta = event.pos() - self._pan_start
             self._pan_start = event.pos()
@@ -1232,10 +1327,19 @@ class DiagramCanvas(QGraphicsView):
             )
             return
 
+        if self._shape_preview is not None and self._shape_start is not None:
+            scene_pos = self.mapToScene(event.pos())
+            if self._mode == 'line':
+                self._shape_preview.setLine(QLineF(self._shape_start, scene_pos))
+            elif self._mode in ('circle', 'rect'):
+                rect = QRectF(self._shape_start, scene_pos).normalized()
+                self._shape_preview.setRect(rect)
+            return
+
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
-        """Завершує режим прокручування."""
+        """Завершує прокручування або фіналізує малювання фігури."""
         if self._pan_start is not None:
             self._pan_start = None
             if self._space_pressed:
@@ -1244,6 +1348,34 @@ class DiagramCanvas(QGraphicsView):
                 self.setCursor(Qt.CursorShape.ArrowCursor)
                 if self._mode == 'select':
                     self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
+            return
+
+        if self._shape_preview is not None and self._shape_start is not None and event.button() == Qt.MouseButton.LeftButton:
+            scene_pos = self.mapToScene(event.pos())
+            valid = False
+            if self._mode == 'line':
+                line = QLineF(self._shape_start, scene_pos)
+                valid = line.length() > 8
+                if valid:
+                    self._shape_preview.setLine(line)
+            elif self._mode in ('circle', 'rect'):
+                rect = QRectF(self._shape_start, scene_pos).normalized()
+                valid = rect.width() > 8 or rect.height() > 8
+                if valid:
+                    self._shape_preview.setRect(rect)
+
+            item = self._shape_preview
+            self._shape_preview = None
+            self._shape_start = None
+            self._scene.removeItem(item)
+
+            if valid:
+                item.setFlags(
+                    QGraphicsItem.GraphicsItemFlag.ItemIsMovable |
+                    QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
+                )
+                self.undo_stack.push(AddShapeCommand(self._scene, item))
+                self.mark_modified()
             return
 
         super().mouseReleaseEvent(event)
@@ -1427,19 +1559,22 @@ class DiagramCanvas(QGraphicsView):
     def export_pdf(self, filepath: str) -> bool:
         """Рендерить схему у PDF-файл формату A4 landscape; повертає True в разі успіху."""
         try:
-            printer = QPrinter(QPrinter.PrinterMode.HighResolution)
-            printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
-            printer.setOutputFileName(filepath)
-            printer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
-            printer.setPageOrientation(QPageLayout.Orientation.Landscape)
+            scene_rect = self._scene.itemsBoundingRect().adjusted(-20, -20, 20, 20)
+            if scene_rect.width() <= 0 or scene_rect.height() <= 0:
+                return False
 
-            painter = QPainter(printer)
+            # QPdfWriter — спеціальний клас для PDF, не потребує принтера
+            writer = QPdfWriter(filepath)
+            writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+            writer.setPageOrientation(QPageLayout.Orientation.Landscape)
+            writer.setResolution(150)  # DPI: достатньо для друку A4
+
+            painter = QPainter(writer)
             if not painter.isActive():
                 return False
 
-            page_rect = QRectF(printer.pageRect(QPrinter.Unit.DevicePixel))
-            scene_rect = self._scene.itemsBoundingRect().adjusted(-20, -20, 20, 20)
-
+            # Розмір сторінки в пікселях при заданому DPI
+            page_rect = QRectF(0, 0, writer.width(), writer.height())
             self._scene.render(
                 painter,
                 page_rect,
@@ -1449,7 +1584,8 @@ class DiagramCanvas(QGraphicsView):
             painter.end()
             return True
 
-        except Exception:
+        except Exception as e:
+            print(f'[PDF Export Error] {e}')
             return False
 
 
@@ -1761,6 +1897,60 @@ def import_from_csv(
 
     error_string = '\n'.join(errors) if errors else ''
     return nodes_count, links_count, error_string
+
+
+# =============================================================================
+# MinimapView — мінімапа (зменшений огляд всієї сцени)
+# =============================================================================
+
+
+class MinimapView(QGraphicsView):
+    """Мінімапа: зменшений вид сцени з позначкою поточного viewport."""
+
+    def __init__(self, scene: QGraphicsScene, main_view: 'DiagramCanvas', parent=None) -> None:
+        super().__init__(scene, parent)
+        self._main_view = main_view
+        self.setFixedSize(240, 170)
+        self.setInteractive(False)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.setStyleSheet('border: 1px solid #bbb; background: #f8f8f8;')
+
+        # Оновлюємо коли прокручується або масштабується головний вид
+        main_view.horizontalScrollBar().valueChanged.connect(self._refresh)
+        main_view.verticalScrollBar().valueChanged.connect(self._refresh)
+
+        # Таймер для оновлення при змінах сцени (обмежуємо до 5 разів/сек)
+        self._timer = QTimer(self)
+        self._timer.setInterval(200)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self._do_fit)
+        scene.changed.connect(lambda _: self._timer.start())
+
+        self._do_fit()
+
+    def _refresh(self) -> None:
+        self.viewport().update()
+
+    def _do_fit(self) -> None:
+        bounds = self._main_view._scene.itemsBoundingRect()
+        if bounds.isEmpty():
+            bounds = QRectF(-200, -200, 400, 400)
+        self.fitInView(bounds.adjusted(-80, -80, 80, 80), Qt.AspectRatioMode.KeepAspectRatio)
+        self.viewport().update()
+
+    def drawForeground(self, painter: QPainter, rect: QRectF) -> None:
+        """Малює прямокутник видимої зони головного вигляду."""
+        super().drawForeground(painter, rect)
+        visible = self._main_view.mapToScene(
+            self._main_view.viewport().rect()
+        ).boundingRect()
+        pen = QPen(QColor('#E74C3C'), 2)
+        pen.setCosmetic(True)  # Товщина лінії не масштабується разом з вмістом
+        painter.setPen(pen)
+        painter.setBrush(QBrush(QColor(231, 76, 60, 35)))
+        painter.drawRect(visible)
 
 
 # =============================================================================
@@ -2193,11 +2383,22 @@ class LinkDialog(QDialog):
 # Панель властивостей (праворуч)
 # ---------------------------------------------------------------------------
 
+class _NoteEdit(QTextEdit):
+    """QTextEdit що сигналізує про завершення редагування при втраті фокусу."""
+    editing_finished = pyqtSignal()
+
+    def focusOutEvent(self, event) -> None:
+        super().focusOutEvent(event)
+        self.editing_finished.emit()
+
+
 class PropertiesPanel(QWidget):
     """Бічна панель, що відображає властивості поточного виділеного елемента."""
 
-    node_edit_requested = pyqtSignal(str)  # uuid вузла
-    link_edit_requested = pyqtSignal(str)  # uuid зв'язку
+    node_edit_requested = pyqtSignal(str)   # uuid вузла — відкрити повний діалог
+    link_edit_requested = pyqtSignal(str)   # uuid зв'язку — відкрити повний діалог
+    node_inline_changed = pyqtSignal(str, str, str)   # uuid, поле, нове_значення
+    link_inline_changed = pyqtSignal(str, str, str)   # uuid, поле, нове_значення
 
     # Індекси сторінок QStackedWidget
     _PAGE_EMPTY = 0
@@ -2210,6 +2411,10 @@ class PropertiesPanel(QWidget):
         self.setFixedWidth(240)
         self._current_node_uuid: str = ''
         self._current_link_uuid: str = ''
+        self._updating: bool = False          # True під час програмного заповнення полів
+        self._node_title_orig: str = ''       # значення до початку редагування
+        self._node_note_orig: str = ''
+        self._link_label_orig: str = ''
         self._build_ui()
 
     # ------------------------------------------------------------------
@@ -2285,25 +2490,22 @@ class PropertiesPanel(QWidget):
         self._node_photo_label.hide()
         form.addRow('', self._node_photo_label)
 
-        # Назва
-        self._node_title_lbl = QLabel()
-        title_font = QFont()
-        title_font.setBold(True)
-        self._node_title_lbl.setFont(title_font)
-        self._node_title_lbl.setWordWrap(True)
-        self._node_title_lbl.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        form.addRow('Назва:', self._node_title_lbl)
+        # Назва — редагується прямо в панелі
+        self._node_title_edit = QLineEdit()
+        self._node_title_edit.setPlaceholderText('Введіть назву…')
+        self._node_title_edit.editingFinished.connect(self._on_title_committed)
+        form.addRow('Назва:', self._node_title_edit)
 
         # Тип
         self._node_type_lbl = QLabel()
         form.addRow('Тип:', self._node_type_lbl)
 
-        # Примітка
-        self._node_note_lbl = QLabel()
-        self._node_note_lbl.setWordWrap(True)
-        form.addRow('Примітка:', self._node_note_lbl)
+        # Примітка — редагується прямо в панелі
+        self._node_note_edit = _NoteEdit()
+        self._node_note_edit.setFixedHeight(70)
+        self._node_note_edit.setPlaceholderText('Примітка…')
+        self._node_note_edit.editing_finished.connect(self._on_note_committed)
+        form.addRow('Примітка:', self._node_note_edit)
 
         # Колір
         self._node_color_lbl = QLabel()
@@ -2345,10 +2547,11 @@ class PropertiesPanel(QWidget):
         form.setSpacing(8)
         form.setContentsMargins(10, 10, 10, 10)
 
-        # Підпис
-        self._link_label_lbl = QLabel()
-        self._link_label_lbl.setWordWrap(True)
-        form.addRow('Підпис:', self._link_label_lbl)
+        # Підпис — редагується прямо в панелі
+        self._link_label_edit = QLineEdit()
+        self._link_label_edit.setPlaceholderText('Підпис зв\'язку…')
+        self._link_label_edit.editingFinished.connect(self._on_link_label_committed)
+        form.addRow('Підпис:', self._link_label_edit)
 
         # Тип лінії
         self._link_type_lbl = QLabel()
@@ -2386,6 +2589,30 @@ class PropertiesPanel(QWidget):
     # ------------------------------------------------------------------
     # Слоти кнопок редагування
     # ------------------------------------------------------------------
+
+    def _on_title_committed(self) -> None:
+        if self._updating or not self._current_node_uuid:
+            return
+        new_val = self._node_title_edit.text().strip()
+        if new_val != self._node_title_orig:
+            self.node_inline_changed.emit(self._current_node_uuid, 'title', new_val)
+            self._node_title_orig = new_val
+
+    def _on_note_committed(self) -> None:
+        if self._updating or not self._current_node_uuid:
+            return
+        new_val = self._node_note_edit.toPlainText().strip()
+        if new_val != self._node_note_orig:
+            self.node_inline_changed.emit(self._current_node_uuid, 'note', new_val)
+            self._node_note_orig = new_val
+
+    def _on_link_label_committed(self) -> None:
+        if self._updating or not self._current_link_uuid:
+            return
+        new_val = self._link_label_edit.text().strip()
+        if new_val != self._link_label_orig:
+            self.link_inline_changed.emit(self._current_link_uuid, 'label', new_val)
+            self._link_label_orig = new_val
 
     def _on_node_edit_clicked(self) -> None:
         if self._current_node_uuid:
@@ -2433,9 +2660,13 @@ class PropertiesPanel(QWidget):
         else:
             self._node_photo_label.hide()
 
-        self._node_title_lbl.setText(node.title or '—')
+        self._updating = True
+        self._node_title_edit.setText(node.title or '')
+        self._node_note_edit.setPlainText(node.note or '')
+        self._updating = False
+        self._node_title_orig = node.title or ''
+        self._node_note_orig = node.note or ''
         self._node_type_lbl.setText(NODE_TYPE_LABELS.get(node.type, node.type))
-        self._node_note_lbl.setText(node.note or '—')
 
         # Кольорова позначка
         color_html = (
@@ -2455,7 +2686,10 @@ class PropertiesPanel(QWidget):
     def show_link(self, link: 'Link') -> None:
         """Заповнює сторінку зв'язку та показує її."""
         self._current_link_uuid = link.uuid
-        self._link_label_lbl.setText(link.label or '—')
+        self._updating = True
+        self._link_label_edit.setText(link.label or '')
+        self._updating = False
+        self._link_label_orig = link.label or ''
         self._link_type_lbl.setText(LINE_TYPE_LABELS.get(link.line_type, link.line_type))
         self._link_dir_lbl.setText(DIRECTION_LABELS.get(link.direction, link.direction))
         self._link_note_lbl.setText(link.note or '—')
@@ -2736,6 +2970,21 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._filter_dock)
         self._filter_dock.hide()
 
+        # Мінімапа
+        self._minimap_view = MinimapView(self.canvas._scene, self.canvas, self)
+        self._minimap_dock = QDockWidget('Мінімапа', self)
+        self._minimap_dock.setWidget(self._minimap_view)
+        self._minimap_dock.setAllowedAreas(
+            Qt.DockWidgetArea.RightDockWidgetArea |
+            Qt.DockWidgetArea.LeftDockWidgetArea
+        )
+        self._minimap_dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetClosable |
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+        )
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._minimap_dock)
+        self._minimap_dock.hide()
+
     # ==================================================================
     # Панель інструментів
     # ==================================================================
@@ -2786,6 +3035,33 @@ class MainWindow(QMainWindow):
         self._act_mode_link.triggered.connect(self._action_set_mode_link)
         mode_group.addAction(self._act_mode_link)
         toolbar.addAction(self._act_mode_link)
+
+        toolbar.addSeparator()
+
+        # Shape Tools (ті ж mode_group — тільки один режим активний одночасно)
+        self._act_mode_line = QAction('Лінія', self)
+        self._act_mode_line.setCheckable(True)
+        self._act_mode_line.triggered.connect(self._action_set_mode_line)
+        mode_group.addAction(self._act_mode_line)
+        toolbar.addAction(self._act_mode_line)
+
+        self._act_mode_circle = QAction('Коло', self)
+        self._act_mode_circle.setCheckable(True)
+        self._act_mode_circle.triggered.connect(self._action_set_mode_circle)
+        mode_group.addAction(self._act_mode_circle)
+        toolbar.addAction(self._act_mode_circle)
+
+        self._act_mode_rect = QAction('Прямокутник', self)
+        self._act_mode_rect.setCheckable(True)
+        self._act_mode_rect.triggered.connect(self._action_set_mode_rect)
+        mode_group.addAction(self._act_mode_rect)
+        toolbar.addAction(self._act_mode_rect)
+
+        self._act_mode_text = QAction('Текст', self)
+        self._act_mode_text.setCheckable(True)
+        self._act_mode_text.triggered.connect(self._action_set_mode_text)
+        mode_group.addAction(self._act_mode_text)
+        toolbar.addAction(self._act_mode_text)
 
         toolbar.addSeparator()
 
@@ -3015,6 +3291,13 @@ class MainWindow(QMainWindow):
         self.properties_panel.node_edit_requested.connect(self._on_edit_node)
         self.properties_panel.link_edit_requested.connect(self._on_edit_link)
 
+        # Inline редагування в панелі
+        self.properties_panel.node_inline_changed.connect(self._on_node_inline_changed)
+        self.properties_panel.link_inline_changed.connect(self._on_link_inline_changed)
+
+        # Оновлення панелі після Undo/Redo
+        self.canvas.undo_stack.indexChanged.connect(self._refresh_properties)
+
     # ------------------------------------------------------------------
     # Слоти сигналів вибору
     # ------------------------------------------------------------------
@@ -3212,7 +3495,7 @@ class MainWindow(QMainWindow):
         self.canvas.undo_stack.push(EditLinkCommand(self.canvas, link_uuid, old_data, new_data))
 
     def _action_delete(self) -> None:
-        """Видаляє виділені вузли та/або зв'язки разом із пов'язаними ребрами."""
+        """Видаляє виділені вузли, зв'язки та/або геометричні фігури."""
         selected = self.canvas.scene().selectedItems()
 
         sel_nodes = [
@@ -3224,6 +3507,10 @@ class MainWindow(QMainWindow):
             self.canvas.links[i.link.uuid]
             for i in selected
             if isinstance(i, LinkItem) and i.link.uuid in self.canvas.links
+        ]
+        sel_shapes = [
+            i for i in selected
+            if not isinstance(i, (NodeItem, LinkItem))
         ]
 
         # Збираємо зв'язки, пов'язані з вузлами, що видаляються
@@ -3241,6 +3528,10 @@ class MainWindow(QMainWindow):
             self.canvas.undo_stack.push(DeleteNodesCommand(self.canvas, sel_nodes, all_links))
         elif all_links:
             self.canvas.undo_stack.push(DeleteLinksCommand(self.canvas, all_links))
+
+        if sel_shapes:
+            self.canvas.undo_stack.push(DeleteShapeCommand(self.canvas._scene, sel_shapes))
+            self.canvas.mark_modified()
 
     def _action_duplicate(self) -> None:
         """Дублює виділені вузли зі зміщенням 40px."""
@@ -3269,6 +3560,38 @@ class MainWindow(QMainWindow):
     # Обробники дій вигляду та інструментів
     # ==================================================================
 
+    def _on_node_inline_changed(self, uuid: str, field: str, value: str) -> None:
+        """Застосовує inline-зміну поля вузла через undo-стек."""
+        node = self.canvas.nodes.get(uuid)
+        if node is None:
+            return
+        old_data = {field: getattr(node, field, '')}
+        new_data = {field: value}
+        self.canvas.undo_stack.push(
+            EditNodeCommand(self.canvas, uuid, old_data, new_data, f'Редагувати {field}')
+        )
+
+    def _on_link_inline_changed(self, uuid: str, field: str, value: str) -> None:
+        """Застосовує inline-зміну поля зв'язку через undo-стек."""
+        link = self.canvas.links.get(uuid)
+        if link is None:
+            return
+        old_data = {field: getattr(link, field, '')}
+        new_data = {field: value}
+        self.canvas.undo_stack.push(
+            EditLinkCommand(self.canvas, uuid, old_data, new_data, f'Редагувати {field}')
+        )
+
+    def _refresh_properties(self) -> None:
+        """Оновлює панель після Undo/Redo."""
+        uuid = self.properties_panel._current_node_uuid
+        if uuid and uuid in self.canvas.nodes:
+            self.properties_panel.show_node(self.canvas.nodes[uuid])
+            return
+        uuid = self.properties_panel._current_link_uuid
+        if uuid and uuid in self.canvas.links:
+            self.properties_panel.show_link(self.canvas.links[uuid])
+
     def _action_set_mode_select(self) -> None:
         self.canvas.set_mode('select')
         self._act_mode_select.setChecked(True)
@@ -3276,6 +3599,22 @@ class MainWindow(QMainWindow):
     def _action_set_mode_link(self) -> None:
         self.canvas.set_mode('link')
         self._act_mode_link.setChecked(True)
+
+    def _action_set_mode_line(self) -> None:
+        self.canvas.set_mode('line')
+        self._act_mode_line.setChecked(True)
+
+    def _action_set_mode_circle(self) -> None:
+        self.canvas.set_mode('circle')
+        self._act_mode_circle.setChecked(True)
+
+    def _action_set_mode_rect(self) -> None:
+        self.canvas.set_mode('rect')
+        self._act_mode_rect.setChecked(True)
+
+    def _action_set_mode_text(self) -> None:
+        self.canvas.set_mode('text')
+        self._act_mode_text.setChecked(True)
 
     def _action_toggle_search(self) -> None:
         """Перемикає видимість панелі пошуку."""
@@ -3286,9 +3625,9 @@ class MainWindow(QMainWindow):
         self._filter_dock.setVisible(not self._filter_dock.isVisible())
 
     def _on_minimap_toggle(self, checked: bool) -> None:
-        QMessageBox.information(
-            self, 'Мінімапа', 'Мінімапа буде додана пізніше.'
-        )
+        self._minimap_dock.setVisible(checked)
+        if checked:
+            self._minimap_view._do_fit()
 
     def _action_about(self) -> None:
         QMessageBox.about(
