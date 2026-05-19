@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QScrollArea, QSizePolicy, QStyle, QStyleFactory,
     QFrame, QSplitter, QAbstractScrollArea, QStackedWidget, QInputDialog,
     QGraphicsLineItem, QGraphicsEllipseItem, QGraphicsRectItem,
-    QGraphicsSimpleTextItem, QSpinBox
+    QGraphicsSimpleTextItem, QSpinBox, QListWidget, QListWidgetItem
 )
 from PyQt6.QtCore import (
     Qt, QRectF, QPointF, QSizeF, QTimer, QObject, pyqtSignal, QLineF, QSize
@@ -27,36 +27,39 @@ from PyQt6.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewDialog
 # Константи програми
 # ---------------------------------------------------------------------------
 
-NODE_TYPES = ['Person', 'Organization', 'Phone', 'Vehicle', 'Document', 'Event', 'Location']
+NODE_TYPES = ['Person', 'Organization', 'Phone', 'Motor Vehicle', 'Document', 'Event', 'Location', 'Bank Account']
 
 NODE_TYPE_LABELS = {
     'Person': 'Особа',
     'Organization': 'Організація',
     'Phone': 'Телефон',
-    'Vehicle': 'Транспорт',
+    'Motor Vehicle': 'Транспорт',
     'Document': 'Документ',
     'Event': 'Подія',
     'Location': 'Локація',
+    'Bank Account': 'Банківський рахунок',
 }
 
 NODE_DEFAULT_COLORS = {
     'Person': '#4A90D9',
     'Organization': '#7B68EE',
     'Phone': '#50C878',
-    'Vehicle': '#FF8C00',
+    'Motor Vehicle': '#FF8C00',
     'Document': '#708090',
     'Event': '#DC143C',
     'Location': '#20B2AA',
+    'Bank Account': '#2E8B57',
 }
 
 NODE_ICONS = {
     'Person': '👤',
     'Organization': '🏢',
     'Phone': '☎',
-    'Vehicle': '🚗',
+    'Motor Vehicle': '🚗',
     'Document': '📄',
     'Event': '◆',
     'Location': '📍',
+    'Bank Account': '🏦',
 }
 
 LINE_TYPE_LABELS = {
@@ -73,7 +76,13 @@ DIRECTION_LABELS = {
     'bidirectional': 'Двосторонній',
 }
 
-SCHEMA_VERSION = 1
+LINK_STRENGTH_LABELS = {
+    'Confirmed': 'Підтверджений',
+    'Unconfirmed': 'Непідтверджений',
+    'Tentative': 'Попередній',
+}
+
+SCHEMA_VERSION = 2
 AUTOSAVE_INTERVAL_MS = 5 * 60 * 1000
 AUTOSAVE_PATH = str(Path.home() / '.analyst_notebook_autosave.json')
 NODE_W, NODE_H = 130, 90
@@ -96,6 +105,9 @@ class Node:
         color: Optional[str] = None,
         photo_base64: str = '',
         node_uuid: Optional[str] = None,
+        frame_enabled: bool = False,
+        frame_color: str = '#FF0000',
+        frame_width: int = 3,
     ) -> None:
         self.uuid: str = node_uuid if node_uuid else str(uuid.uuid4())
         self.type: str = type
@@ -104,9 +116,11 @@ class Node:
         self.date: str = date
         self.x: float = float(x)
         self.y: float = float(y)
-        # Якщо колір не передано — беремо стандартний для типу
         self.color: str = color if color else NODE_DEFAULT_COLORS.get(type, '#4A90D9')
         self.photo_base64: str = photo_base64
+        self.frame_enabled: bool = frame_enabled
+        self.frame_color: str = frame_color
+        self.frame_width: int = frame_width
         now = datetime.now().isoformat()
         self.created_at: str = now
         self.updated_at: str = now
@@ -127,6 +141,9 @@ class Node:
             'y': self.y,
             'color': self.color,
             'photo_base64': self.photo_base64,
+            'frame_enabled': self.frame_enabled,
+            'frame_color': self.frame_color,
+            'frame_width': self.frame_width,
             'created_at': self.created_at,
             'updated_at': self.updated_at,
         }
@@ -134,8 +151,12 @@ class Node:
     @classmethod
     def from_dict(cls, d: dict) -> 'Node':
         """Відновлює вузол зі словника; відсутні поля замінює значеннями за замовчуванням."""
+        # v1 migration: Vehicle → Motor Vehicle
+        node_type = d.get('type', 'Person')
+        if node_type == 'Vehicle':
+            node_type = 'Motor Vehicle'
         node = cls(
-            type=d.get('type', 'Person'),
+            type=node_type,
             title=d.get('title', ''),
             note=d.get('note', ''),
             date=d.get('date', ''),
@@ -144,8 +165,10 @@ class Node:
             color=d.get('color', None),
             photo_base64=d.get('photo_base64', ''),
             node_uuid=d.get('uuid', None),
+            frame_enabled=bool(d.get('frame_enabled', False)),
+            frame_color=d.get('frame_color', '#FF0000'),
+            frame_width=int(d.get('frame_width', 3)),
         )
-        # Відновлюємо часові мітки, якщо вони є у файлі
         if 'created_at' in d:
             node.created_at = d['created_at']
         if 'updated_at' in d:
@@ -175,6 +198,13 @@ class Link:
         link_uuid: Optional[str] = None,
         color: str = '#555555',
         width: int = 2,
+        strength: str = 'Confirmed',
+        multiplicity: str = '',
+        date_time: str = '',
+        start_date_time: str = '',
+        end_date_time: str = '',
+        weighting_value: float = 0.0,
+        source_reference: str = '',
     ) -> None:
         self.uuid: str = link_uuid if link_uuid else str(uuid.uuid4())
         self.source_uuid: str = source_uuid
@@ -185,6 +215,13 @@ class Link:
         self.note: str = note
         self.color: str = color
         self.width: int = width
+        self.strength: str = strength
+        self.multiplicity: str = multiplicity
+        self.date_time: str = date_time
+        self.start_date_time: str = start_date_time
+        self.end_date_time: str = end_date_time
+        self.weighting_value: float = weighting_value
+        self.source_reference: str = source_reference
         now = datetime.now().isoformat()
         self.created_at: str = now
         self.updated_at: str = now
@@ -205,6 +242,13 @@ class Link:
             'note': self.note,
             'color': self.color,
             'width': self.width,
+            'strength': self.strength,
+            'multiplicity': self.multiplicity,
+            'date_time': self.date_time,
+            'start_date_time': self.start_date_time,
+            'end_date_time': self.end_date_time,
+            'weighting_value': self.weighting_value,
+            'source_reference': self.source_reference,
             'created_at': self.created_at,
             'updated_at': self.updated_at,
         }
@@ -212,21 +256,37 @@ class Link:
     @classmethod
     def from_dict(cls, d: dict) -> 'Link':
         """Відновлює зв'язок зі словника; відсутні поля замінює значеннями за замовчуванням."""
+        # v1 migration: line_type mapped to strength
+        raw_line_type = d.get('line_type', 'solid_arrow')
+        strength = d.get('strength', 'Confirmed')
+        if 'strength' not in d:
+            # derive strength from legacy line_type for v1 files
+            if raw_line_type == 'dashed':
+                strength = 'Unconfirmed'
+            elif raw_line_type in ('dotted', 'double'):
+                strength = 'Tentative'
         link = cls(
             source_uuid=d.get('source_uuid', ''),
             target_uuid=d.get('target_uuid', ''),
             label=d.get('label', ''),
-            line_type=d.get('line_type', 'solid_arrow'),
+            line_type=raw_line_type,
             direction=d.get('direction', 'source_to_target'),
             note=d.get('note', ''),
             link_uuid=d.get('uuid', None),
+            color=d.get('color', '#555555'),
+            width=int(d.get('width', 2)),
+            strength=strength,
+            multiplicity=d.get('multiplicity', ''),
+            date_time=d.get('date_time', ''),
+            start_date_time=d.get('start_date_time', ''),
+            end_date_time=d.get('end_date_time', ''),
+            weighting_value=float(d.get('weighting_value', 0.0)),
+            source_reference=d.get('source_reference', ''),
         )
         if 'created_at' in d:
             link.created_at = d['created_at']
         if 'updated_at' in d:
             link.updated_at = d['updated_at']
-        link.color = d.get('color', '#555555')
-        link.width = int(d.get('width', 2))
         return link
 
     def touch(self) -> None:
@@ -465,33 +525,41 @@ class EditLinkCommand(QUndoCommand):
 class AddShapeCommand(QUndoCommand):
     """Команда: додати геометричну фігуру на сцену."""
 
-    def __init__(self, scene: 'QGraphicsScene', item: 'QGraphicsItem') -> None:
+    def __init__(self, canvas: 'DiagramCanvas', item: 'QGraphicsItem') -> None:
         super().__init__('Додати фігуру')
-        self._scene = scene
+        self._canvas = canvas
         self._item = item
 
     def redo(self) -> None:
-        self._scene.addItem(self._item)
+        self._canvas._scene.addItem(self._item)
+        if self._item not in self._canvas._shape_items:
+            self._canvas._shape_items.append(self._item)
 
     def undo(self) -> None:
-        self._scene.removeItem(self._item)
+        self._canvas._scene.removeItem(self._item)
+        if self._item in self._canvas._shape_items:
+            self._canvas._shape_items.remove(self._item)
 
 
 class DeleteShapeCommand(QUndoCommand):
     """Команда: видалити геометричні фігури зі сцени."""
 
-    def __init__(self, scene: 'QGraphicsScene', items: list) -> None:
+    def __init__(self, canvas: 'DiagramCanvas', items: list) -> None:
         super().__init__('Видалити фігури')
-        self._scene = scene
+        self._canvas = canvas
         self._items = list(items)
 
     def redo(self) -> None:
         for item in self._items:
-            self._scene.removeItem(item)
+            self._canvas._scene.removeItem(item)
+            if item in self._canvas._shape_items:
+                self._canvas._shape_items.remove(item)
 
     def undo(self) -> None:
         for item in self._items:
-            self._scene.addItem(item)
+            self._canvas._scene.addItem(item)
+            if item not in self._canvas._shape_items:
+                self._canvas._shape_items.append(item)
 
 
 # =============================================================================
@@ -555,6 +623,15 @@ class NodeItem(QGraphicsObject):
             painter.setPen(QPen(QColor(self.node.color), 2))
 
         painter.drawRoundedRect(rect, 8, 8)
+
+        # --- Icon Frame (кольорова рамка навколо вузла) ---
+        if getattr(self.node, 'frame_enabled', False) and not selected:
+            fw = getattr(self.node, 'frame_width', 3)
+            fc = getattr(self.node, 'frame_color', '#FF0000')
+            frame_pen = QPen(QColor(fc), fw)
+            painter.setPen(frame_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(rect.adjusted(fw / 2, fw / 2, -fw / 2, -fw / 2), 8, 8)
 
         # --- Верхня область (висота 40px): фото або іконка-емодзі ---
         top_area_h = 40
@@ -740,11 +817,39 @@ class LinkItem(QGraphicsObject):
     # Оновлення геометрії
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _intersect_node_rect(line: QLineF, node_pos: QPointF) -> QPointF:
+        """Повертає точку перетину лінії з межею прямокутника вузла.
+        Якщо перетину немає — повертає центр вузла."""
+        rect = QRectF(node_pos.x(), node_pos.y(), NODE_W, NODE_H)
+        edges = [
+            QLineF(rect.topLeft(), rect.topRight()),
+            QLineF(rect.topRight(), rect.bottomRight()),
+            QLineF(rect.bottomRight(), rect.bottomLeft()),
+            QLineF(rect.bottomLeft(), rect.topLeft()),
+        ]
+        intersection = QPointF()
+        for edge in edges:
+            result = line.intersects(edge, intersection)
+            if result == QLineF.IntersectionType.BoundedIntersection:
+                return QPointF(intersection)
+        return QPointF(node_pos.x() + NODE_W / 2, node_pos.y() + NODE_H / 2)
+
     def update_position(self):
-        """Перераховує лінію між центрами вузлів."""
-        src_center = self.source_item.pos() + QPointF(NODE_W / 2, NODE_H / 2)
-        dst_center = self.target_item.pos() + QPointF(NODE_W / 2, NODE_H / 2)
-        self._line = QLineF(src_center, dst_center)
+        """Перераховує лінію між межами вузлів (обрізає до прямокутника вузла)."""
+        src_pos = self.source_item.pos()
+        dst_pos = self.target_item.pos()
+        src_center = src_pos + QPointF(NODE_W / 2, NODE_H / 2)
+        dst_center = dst_pos + QPointF(NODE_W / 2, NODE_H / 2)
+        center_line = QLineF(src_center, dst_center)
+
+        if center_line.length() < 1:
+            self._line = center_line
+        else:
+            src_pt = self._intersect_node_rect(QLineF(dst_center, src_center), src_pos)
+            dst_pt = self._intersect_node_rect(QLineF(src_center, dst_center), dst_pos)
+            self._line = QLineF(src_pt, dst_pt)
+
         self.prepareGeometryChange()
         self.update()
 
@@ -790,18 +895,21 @@ class LinkItem(QGraphicsObject):
         line_color = QColor('#2196F3') if selected else base_color
         lw = getattr(self.link, 'width', 2)
 
-        line_type = self.link.line_type  # тип лінії
+        line_type = self.link.line_type
+        strength = getattr(self.link, 'strength', 'Confirmed')
 
-        # --- Формуємо перо залежно від типу лінії ---
-        if line_type == 'dashed':
-            pen = QPen(line_color, lw, Qt.PenStyle.DashLine)
+        # Стиль пера визначається strength (семантика i2)
+        if strength == 'Unconfirmed':
+            pen_style = Qt.PenStyle.DashLine
+        elif strength == 'Tentative':
+            pen_style = Qt.PenStyle.DotLine
         else:
-            pen = QPen(line_color, lw, Qt.PenStyle.SolidLine)
+            pen_style = Qt.PenStyle.SolidLine
 
+        pen = QPen(line_color, lw, pen_style)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
 
         if line_type == 'double':
-            # Малюємо дві паралельні лінії зі зміщенням ±3px перпендикулярно
             self._draw_double_line(painter, pen)
         else:
             painter.setPen(pen)
@@ -1050,6 +1158,8 @@ class DiagramCanvas(QGraphicsView):
         # --- Графічні елементи сцени ---
         self.node_items: dict[str, NodeItem] = {}
         self.link_items: dict[str, LinkItem] = {}
+        self._shape_items: list = []       # QGraphicsLineItem / EllipseItem / RectItem / TextItem
+        self._group_items: list = []       # GroupItem
 
         # --- Стан файлу ---
         self.is_modified: bool = False
@@ -1169,6 +1279,8 @@ class DiagramCanvas(QGraphicsView):
         self.links.clear()
         self.node_items.clear()
         self.link_items.clear()
+        self._shape_items.clear()
+        self._group_items.clear()
         self.is_modified = False
         self.current_file = None
         self.undo_stack.clear()
@@ -1303,6 +1415,147 @@ class DiagramCanvas(QGraphicsView):
         self.mark_modified()
         self.status_message.emit('Авто-розміщення (радіально) виконано')
 
+    def auto_layout_circular(self) -> None:
+        """Circular (i2): всі вузли рівномірно по колу."""
+        import math
+        nodes = list(self.nodes.values())
+        if not nodes:
+            return
+        cx, cy = 500, 400
+        radius = max(150, len(nodes) * 30)
+        for i, node in enumerate(nodes):
+            angle = 2 * math.pi * i / len(nodes) - math.pi / 2
+            node.x = cx + radius * math.cos(angle)
+            node.y = cy + radius * math.sin(angle)
+            it = self.node_items.get(node.uuid)
+            if it:
+                it.setPos(node.x, node.y)
+        for li in self.link_items.values():
+            li.update_position()
+        self.mark_modified()
+        self.status_message.emit('Circular layout виконано')
+
+    def auto_layout_hierarchy(self) -> None:
+        """Hierarchy (i2): BFS від найбільш пов'язаного вузла, рівнями зверху вниз."""
+        from collections import deque
+        nodes = list(self.nodes.values())
+        if not nodes:
+            return
+
+        # Граф суміжності
+        adj: dict[str, list[str]] = {n.uuid: [] for n in nodes}
+        for lk in self.links.values():
+            adj[lk.source_uuid].append(lk.target_uuid)
+            adj[lk.target_uuid].append(lk.source_uuid)
+
+        # Корінь — найбільш пов'язаний
+        root = max(adj, key=lambda u: len(adj[u]))
+
+        # BFS для визначення рівнів
+        level: dict[str, int] = {root: 0}
+        queue: deque[str] = deque([root])
+        while queue:
+            cur = queue.popleft()
+            for nb in adj[cur]:
+                if nb not in level:
+                    level[nb] = level[cur] + 1
+                    queue.append(nb)
+        # Ізольовані вузли — на окремому рівні
+        max_lvl = max(level.values(), default=0)
+        for n in nodes:
+            if n.uuid not in level:
+                max_lvl += 1
+                level[n.uuid] = max_lvl
+
+        # Групуємо по рівнях
+        levels: dict[int, list[str]] = {}
+        for uid, lvl in level.items():
+            levels.setdefault(lvl, []).append(uid)
+
+        y_step = 160
+        for lvl, uids in sorted(levels.items()):
+            x_step = max(180, 900 // (len(uids) + 1))
+            for j, uid in enumerate(uids):
+                x = (j + 1) * x_step - (len(uids) * x_step) / 2 + 500
+                y = lvl * y_step + 60
+                node = self.nodes.get(uid)
+                if node:
+                    node.x, node.y = x, y
+                    it = self.node_items.get(uid)
+                    if it:
+                        it.setPos(x, y)
+        for li in self.link_items.values():
+            li.update_position()
+        self.mark_modified()
+        self.status_message.emit('Hierarchy layout виконано')
+
+    def auto_layout_peacock(self) -> None:
+        """Peacock (i2): центральний хаб + промені-гілки для кожного сусіда."""
+        import math
+        nodes = list(self.nodes.values())
+        if not nodes:
+            return
+
+        # Граф суміжності
+        adj: dict[str, list[str]] = {n.uuid: [] for n in nodes}
+        for lk in self.links.values():
+            adj[lk.source_uuid].append(lk.target_uuid)
+            adj[lk.target_uuid].append(lk.source_uuid)
+
+        # Центральний вузол — найбільш пов'язаний
+        hub = max(adj, key=lambda u: len(adj[u]))
+        cx, cy = 500, 400
+        hub_node = self.nodes[hub]
+        hub_node.x, hub_node.y = cx, cy
+        hub_it = self.node_items.get(hub)
+        if hub_it:
+            hub_it.setPos(cx, cy)
+
+        # Розкладаємо сусідів хаба по промінях
+        branches = adj[hub]
+        r1 = 220
+        for i, nb in enumerate(branches):
+            angle = 2 * math.pi * i / max(len(branches), 1) - math.pi / 2
+            nx = cx + r1 * math.cos(angle)
+            ny = cy + r1 * math.sin(angle)
+            nb_node = self.nodes.get(nb)
+            if nb_node:
+                nb_node.x, nb_node.y = nx, ny
+                nb_it = self.node_items.get(nb)
+                if nb_it:
+                    nb_it.setPos(nx, ny)
+
+            # Сусіди сусіда (2-й рівень)
+            sub = [u for u in adj[nb] if u != hub and u not in branches]
+            r2 = 140
+            for k, s in enumerate(sub):
+                sub_angle = angle + (k - len(sub) / 2 + 0.5) * 0.5
+                sx = nx + r2 * math.cos(sub_angle)
+                sy = ny + r2 * math.sin(sub_angle)
+                s_node = self.nodes.get(s)
+                if s_node:
+                    s_node.x, s_node.y = sx, sy
+                    s_it = self.node_items.get(s)
+                    if s_it:
+                        s_it.setPos(sx, sy)
+
+        # Ізольовані вузли — праворуч
+        placed = {hub} | set(branches)
+        for br in branches:
+            placed |= set(adj[br])
+        isolated = [n for n in nodes if n.uuid not in placed]
+        for i, node in enumerate(isolated):
+            node.x = 900 + (i % 3) * 180
+            node.y = 60 + (i // 3) * 150
+            it = self.node_items.get(node.uuid)
+            if it:
+                it.setPos(node.x, node.y)
+
+        for li in self.link_items.values():
+            li.update_position()
+        self.mark_modified()
+        self.status_message.emit('Peacock layout виконано')
+
     # ------------------------------------------------------------------
     # Групування вузлів
     # ------------------------------------------------------------------
@@ -1318,6 +1571,7 @@ class DiagramCanvas(QGraphicsView):
             label = ''
         group = GroupItem(items, label.strip())
         self._scene.addItem(group)
+        self._group_items.append(group)
         self._scene.clearSelection()
         group.setSelected(True)
         self.mark_modified()
@@ -1330,6 +1584,8 @@ class DiagramCanvas(QGraphicsView):
         for item in list(self._scene.selectedItems()):
             if isinstance(item, GroupItem):
                 self._scene.removeItem(item)
+                if item in self._group_items:
+                    self._group_items.remove(item)
                 removed += 1
         if removed:
             self.mark_modified()
@@ -1363,6 +1619,64 @@ class DiagramCanvas(QGraphicsView):
         for li in self.link_items.values():
             li.setVisible(True)
         self.status_message.emit('Усі елементи відображено')
+
+    # ------------------------------------------------------------------
+    # Find Path — BFS між двома вузлами
+    # ------------------------------------------------------------------
+
+    def find_path_between(self, start_uuid: str, end_uuid: str) -> list:
+        """BFS пошук найкоротшого шляху між двома вузлами.
+        Повертає список uuid вузлів або [] якщо шляху немає."""
+        from collections import deque
+
+        if start_uuid not in self.nodes or end_uuid not in self.nodes:
+            return []
+        if start_uuid == end_uuid:
+            return [start_uuid]
+
+        # Будуємо граф суміжності (неорієнтований для пошуку)
+        adjacency: dict[str, list[str]] = {uid: [] for uid in self.nodes}
+        for link in self.links.values():
+            adjacency[link.source_uuid].append(link.target_uuid)
+            adjacency[link.target_uuid].append(link.source_uuid)
+
+        visited = {start_uuid}
+        queue: deque[list[str]] = deque([[start_uuid]])
+
+        while queue:
+            path = queue.popleft()
+            current = path[-1]
+            for neighbor in adjacency.get(current, []):
+                if neighbor == end_uuid:
+                    return path + [neighbor]
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append(path + [neighbor])
+        return []
+
+    def highlight_path(self, path_uuids: list) -> None:
+        """Виділяє вузли і зв'язки що утворюють шлях; решту ховає."""
+        if not path_uuids:
+            self.status_message.emit('Шлях не знайдено')
+            return
+
+        path_set = set(path_uuids)
+
+        # Визначаємо зв'язки на шляху
+        path_links: set[str] = set()
+        for i in range(len(path_uuids) - 1):
+            a, b = path_uuids[i], path_uuids[i + 1]
+            for uid, link in self.links.items():
+                if {link.source_uuid, link.target_uuid} == {a, b}:
+                    path_links.add(uid)
+                    break
+
+        for uid, it in self.node_items.items():
+            it.setVisible(uid in path_set)
+        for uid, li in self.link_items.items():
+            li.setVisible(uid in path_links)
+
+        self.status_message.emit(f'Шлях знайдено: {len(path_uuids)} вузлів')
 
     # ------------------------------------------------------------------
     # Малювання фону (сітка крапок)
@@ -1509,7 +1823,7 @@ class DiagramCanvas(QGraphicsView):
                         QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
                     )
                     item.setZValue(0.5)
-                    self.undo_stack.push(AddShapeCommand(self._scene, item))
+                    self.undo_stack.push(AddShapeCommand(self, item))
                     self.mark_modified()
                 self._shape_start = None
             else:
@@ -1592,7 +1906,7 @@ class DiagramCanvas(QGraphicsView):
                     QGraphicsItem.GraphicsItemFlag.ItemIsMovable |
                     QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
                 )
-                self.undo_stack.push(AddShapeCommand(self._scene, item))
+                self.undo_stack.push(AddShapeCommand(self, item))
                 self.mark_modified()
             return
 
@@ -1812,6 +2126,81 @@ class DiagramCanvas(QGraphicsView):
 # =============================================================================
 
 
+def _serialize_shape(item) -> Optional[dict]:
+    """Серіалізує QGraphicsItem-фігуру в словник."""
+    pen = item.pen() if hasattr(item, 'pen') else None
+    pen_data = {}
+    if pen is not None:
+        pen_data = {
+            'color': pen.color().name(),
+            'width': pen.widthF(),
+            'style': int(pen.style()),
+        }
+    brush_data = {}
+    if hasattr(item, 'brush'):
+        b = item.brush()
+        brush_data = {'color': b.color().name(), 'alpha': b.color().alpha()}
+
+    pos = item.pos()
+    base = {'pos': [pos.x(), pos.y()], 'pen': pen_data, 'brush': brush_data, 'z': item.zValue()}
+
+    if isinstance(item, QGraphicsLineItem):
+        ln = item.line()
+        return {**base, 'type': 'line', 'x1': ln.x1(), 'y1': ln.y1(), 'x2': ln.x2(), 'y2': ln.y2()}
+    elif isinstance(item, QGraphicsEllipseItem):
+        r = item.rect()
+        return {**base, 'type': 'ellipse', 'x': r.x(), 'y': r.y(), 'w': r.width(), 'h': r.height()}
+    elif isinstance(item, QGraphicsRectItem):
+        r = item.rect()
+        return {**base, 'type': 'rect', 'x': r.x(), 'y': r.y(), 'w': r.width(), 'h': r.height()}
+    elif isinstance(item, QGraphicsSimpleTextItem):
+        return {**base, 'type': 'text', 'text': item.text(),
+                'font_size': item.font().pointSize()}
+    return None
+
+
+def _deserialize_shape(d: dict) -> Optional[object]:
+    """Відновлює QGraphicsItem-фігуру зі словника."""
+    pen_d = d.get('pen', {})
+    pen = QPen(QColor(pen_d.get('color', '#555555')), pen_d.get('width', 2))
+    pen.setStyle(Qt.PenStyle(pen_d.get('style', 1)))
+
+    brush_d = d.get('brush', {})
+    brush_color = QColor(brush_d.get('color', '#6496FF'))
+    brush_color.setAlpha(brush_d.get('alpha', 50))
+    brush = QBrush(brush_color)
+
+    shape_type = d.get('type', '')
+    item = None
+
+    if shape_type == 'line':
+        item = QGraphicsLineItem(QLineF(d['x1'], d['y1'], d['x2'], d['y2']))
+        item.setPen(pen)
+    elif shape_type == 'ellipse':
+        item = QGraphicsEllipseItem(QRectF(d['x'], d['y'], d['w'], d['h']))
+        item.setPen(pen)
+        item.setBrush(brush)
+    elif shape_type == 'rect':
+        item = QGraphicsRectItem(QRectF(d['x'], d['y'], d['w'], d['h']))
+        item.setPen(pen)
+        item.setBrush(brush)
+    elif shape_type == 'text':
+        item = QGraphicsSimpleTextItem(d.get('text', ''))
+        f = QFont()
+        f.setPointSize(int(d.get('font_size', 12)))
+        item.setFont(f)
+
+    if item is not None:
+        p = d.get('pos', [0, 0])
+        item.setPos(QPointF(p[0], p[1]))
+        item.setZValue(d.get('z', -0.5))
+        item.setFlags(
+            QGraphicsItem.GraphicsItemFlag.ItemIsMovable |
+            QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
+        )
+    return item
+
+
 def save_to_json(canvas: DiagramCanvas, filepath: str) -> bool:
     """Зберігає поточну схему у файл JSON.
 
@@ -1831,14 +2220,39 @@ def save_to_json(canvas: DiagramCanvas, filepath: str) -> bool:
 
         now = datetime.now().isoformat()
 
+        # Серіалізуємо фігури (line / ellipse / rect / text)
+        shapes_data = []
+        for sh in canvas._shape_items:
+            s = _serialize_shape(sh)
+            if s:
+                shapes_data.append(s)
+
+        # Серіалізуємо групи
+        groups_data = []
+        for grp in canvas._group_items:
+            member_uuids = []
+            for m in grp.members():
+                if isinstance(m, NodeItem):
+                    member_uuids.append(m.node.uuid)
+            r = grp.rect()
+            groups_data.append({
+                'label': grp._label,
+                'rect': [r.x(), r.y(), r.width(), r.height()],
+                'pos': [grp.pos().x(), grp.pos().y()],
+                'member_uuids': member_uuids,
+            })
+
         data = {
             'schema_version': SCHEMA_VERSION,
             'created_at': original_created_at if original_created_at else now,
             'updated_at': now,
             'grid_enabled': canvas.get_grid_enabled(),
+            'snap_to_grid': canvas._snap_to_grid,
             'viewport': canvas.get_viewport_state(),
             'nodes': [node.to_dict() for node in canvas.nodes.values()],
             'links': [link.to_dict() for link in canvas.links.values()],
+            'groups': groups_data,
+            'shapes': shapes_data,
         }
 
         with open(filepath, 'w', encoding='utf-8') as fh:
@@ -1905,15 +2319,38 @@ def load_from_json(canvas: DiagramCanvas, filepath: str) -> tuple[bool, str]:
             except Exception as exc:
                 skipped_links.append(f'помилка: {exc}')
 
+        # --- Відновлюємо фігури ---
+        for shape_dict in data.get('shapes', []):
+            item = _deserialize_shape(shape_dict)
+            if item is not None:
+                canvas._scene.addItem(item)
+                canvas._shape_items.append(item)
+
+        # --- Відновлюємо групи ---
+        for grp_dict in data.get('groups', []):
+            member_uuids = grp_dict.get('member_uuids', [])
+            member_items = [canvas.node_items[u] for u in member_uuids if u in canvas.node_items]
+            if member_items:
+                grp = GroupItem(member_items, grp_dict.get('label', ''))
+                r = grp_dict.get('rect')
+                if r and len(r) == 4:
+                    grp.setRect(QRectF(*r))
+                p = grp_dict.get('pos')
+                if p and len(p) == 2:
+                    grp.setPos(QPointF(*p))
+                canvas._scene.addItem(grp)
+                canvas._group_items.append(grp)
+
         # --- Відновлюємо стан вигляду ---
         viewport_data = data.get('viewport', {})
         if viewport_data:
             canvas.set_viewport_state(viewport_data)
 
-        # --- Відновлюємо стан сітки ---
+        # --- Відновлюємо стан сітки та snap ---
         if 'grid_enabled' in data and not data['grid_enabled']:
             canvas._grid_enabled = False
             canvas.viewport().update()
+        canvas._snap_to_grid = bool(data.get('snap_to_grid', False))
 
         # --- Скидаємо прапор змін ---
         canvas.is_modified = False
@@ -2215,15 +2652,17 @@ class AutosaveManager(QObject):
             return
 
         try:
-            # Формуємо знімок стану без зміни canvas.current_file
+            shapes_data = [s for s in (_serialize_shape(sh) for sh in self.canvas._shape_items) if s]
             data = {
                 'schema_version': SCHEMA_VERSION,
                 'created_at': datetime.now().isoformat(),
                 'updated_at': datetime.now().isoformat(),
                 'grid_enabled': self.canvas.get_grid_enabled(),
+                'snap_to_grid': self.canvas._snap_to_grid,
                 'viewport': self.canvas.get_viewport_state(),
                 'nodes': [node.to_dict() for node in self.canvas.nodes.values()],
                 'links': [link.to_dict() for link in self.canvas.links.values()],
+                'shapes': shapes_data,
             }
 
             with open(AUTOSAVE_PATH, 'w', encoding='utf-8') as fh:
@@ -2354,6 +2793,23 @@ class NodeDialog(QDialog):
         photo_row.addWidget(self._photo_label)
         form.addRow('Фото:', photo_row)
 
+        # --- Icon Frame ---
+        self._frame_enabled_cb = QCheckBox('Увімкнути рамку')
+        form.addRow('', self._frame_enabled_cb)
+
+        self._frame_color_btn = QPushButton('#FF0000')
+        self._frame_color_btn.setFixedWidth(90)
+        self._frame_color_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._frame_color_btn.clicked.connect(self._on_pick_frame_color)
+        self._frame_color = '#FF0000'
+        self._refresh_frame_color_btn()
+        form.addRow('Колір рамки:', self._frame_color_btn)
+
+        self._frame_width_spin = QSpinBox()
+        self._frame_width_spin.setRange(1, 8)
+        self._frame_width_spin.setValue(3)
+        form.addRow('Товщина рамки:', self._frame_width_spin)
+
         root_layout.addLayout(form)
 
         # --- Кнопки OK / Скасувати ---
@@ -2394,6 +2850,12 @@ class NodeDialog(QDialog):
         if node.photo_base64:
             self._photo_b64 = node.photo_base64
             self._refresh_photo_label()
+
+        # Frame
+        self._frame_enabled_cb.setChecked(getattr(node, 'frame_enabled', False))
+        self._frame_color = getattr(node, 'frame_color', '#FF0000')
+        self._frame_width_spin.setValue(getattr(node, 'frame_width', 3))
+        self._refresh_frame_color_btn()
 
     # ------------------------------------------------------------------
     # Слоти
@@ -2457,6 +2919,21 @@ class NodeDialog(QDialog):
         )
         self._color_btn.setText(self._color)
 
+    def _refresh_frame_color_btn(self) -> None:
+        c = QColor(self._frame_color)
+        lum = (c.red() * 299 + c.green() * 587 + c.blue() * 114) / 1000
+        txt = '#ffffff' if lum < 128 else '#000000'
+        self._frame_color_btn.setStyleSheet(
+            f'background-color:{self._frame_color}; color:{txt}; border:1px solid #888;'
+        )
+        self._frame_color_btn.setText(self._frame_color)
+
+    def _on_pick_frame_color(self) -> None:
+        c = QColorDialog.getColor(QColor(self._frame_color), self, 'Колір рамки')
+        if c.isValid():
+            self._frame_color = c.name()
+            self._refresh_frame_color_btn()
+
     def _refresh_photo_label(self) -> None:
         """Оновлює мініатюру фото та стан кнопки видалення."""
         if self._photo_b64:
@@ -2497,6 +2974,9 @@ class NodeDialog(QDialog):
             'date': self._date_edit.text().strip(),
             'color': self._color,
             'photo_base64': self._photo_b64,
+            'frame_enabled': self._frame_enabled_cb.isChecked(),
+            'frame_color': self._frame_color,
+            'frame_width': self._frame_width_spin.value(),
         }
 
 
@@ -2546,6 +3026,12 @@ class LinkDialog(QDialog):
         for key, label in DIRECTION_LABELS.items():
             self._direction_combo.addItem(label, userData=key)
         form.addRow('Напрямок:', self._direction_combo)
+
+        # --- Надійність (strength) ---
+        self._strength_combo = QComboBox()
+        for key, label in LINK_STRENGTH_LABELS.items():
+            self._strength_combo.addItem(label, userData=key)
+        form.addRow('Надійність:', self._strength_combo)
 
         # --- Колір лінії ---
         self._link_color_btn = QPushButton()
@@ -2621,6 +3107,12 @@ class LinkDialog(QDialog):
         self._link_width_spin.setValue(getattr(link, 'width', 2))
         self._note_edit.setPlainText(link.note)
 
+        strength = getattr(link, 'strength', 'Confirmed')
+        for i in range(self._strength_combo.count()):
+            if self._strength_combo.itemData(i) == strength:
+                self._strength_combo.setCurrentIndex(i)
+                break
+
     # ------------------------------------------------------------------
     # Публічний API
     # ------------------------------------------------------------------
@@ -2631,6 +3123,7 @@ class LinkDialog(QDialog):
             'label': self._label_edit.text().strip(),
             'line_type': self._line_type_combo.currentData(),
             'direction': self._direction_combo.currentData(),
+            'strength': self._strength_combo.currentData(),
             'color': self._link_color,
             'width': self._link_width_spin.value(),
             'note': self._note_edit.toPlainText().strip(),
@@ -3167,6 +3660,161 @@ class FilterPanel(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Панель візуального пошуку (P2.6)
+# ---------------------------------------------------------------------------
+
+class VisualSearchPanel(QWidget):
+    """Структурований пошук по елементах схеми з фільтрами типу/strength/direction/дати."""
+
+    def __init__(self, canvas: 'DiagramCanvas', parent=None) -> None:
+        super().__init__(parent)
+        self._canvas = canvas
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        title = QLabel('Візуальний пошук')
+        f = QFont(); f.setBold(True)
+        title.setFont(f)
+        layout.addWidget(title)
+
+        form = QFormLayout()
+        form.setSpacing(5)
+
+        # Текстовий пошук
+        self._text_edit = QLineEdit()
+        self._text_edit.setPlaceholderText('Текст у заголовку вузла…')
+        form.addRow('Текст:', self._text_edit)
+
+        # Тип вузла
+        self._type_combo = QComboBox()
+        self._type_combo.addItem('Всі типи', userData='')
+        for key, label in NODE_TYPE_LABELS.items():
+            self._type_combo.addItem(label, userData=key)
+        form.addRow('Тип:', self._type_combo)
+
+        # Надійність зв'язку
+        self._strength_combo = QComboBox()
+        self._strength_combo.addItem('Будь-яка', userData='')
+        for key, label in LINK_STRENGTH_LABELS.items():
+            self._strength_combo.addItem(label, userData=key)
+        form.addRow('Надійність зв\'язку:', self._strength_combo)
+
+        # Напрямок зв'язку
+        self._direction_combo = QComboBox()
+        self._direction_combo.addItem('Будь-який', userData='')
+        for key, label in DIRECTION_LABELS.items():
+            self._direction_combo.addItem(label, userData=key)
+        form.addRow('Напрямок:', self._direction_combo)
+
+        # Дата вузла (від / до)
+        self._date_from = QLineEdit()
+        self._date_from.setPlaceholderText('РРРР-ММ-ДД')
+        self._date_to = QLineEdit()
+        self._date_to.setPlaceholderText('РРРР-ММ-ДД')
+        form.addRow('Дата від:', self._date_from)
+        form.addRow('Дата до:', self._date_to)
+
+        layout.addLayout(form)
+
+        # Кнопки
+        btn_row = QHBoxLayout()
+        search_btn = QPushButton('Пошук')
+        search_btn.clicked.connect(self._run_search)
+        reset_btn = QPushButton('Скинути')
+        reset_btn.clicked.connect(self._reset)
+        btn_row.addWidget(search_btn)
+        btn_row.addWidget(reset_btn)
+        layout.addLayout(btn_row)
+
+        # Результати
+        self._results_label = QLabel('Результати:')
+        layout.addWidget(self._results_label)
+
+        self._results_list = QListWidget()
+        self._results_list.itemClicked.connect(self._on_result_clicked)
+        layout.addWidget(self._results_list)
+
+    def _run_search(self) -> None:
+        """Запускає пошук і відображає результати."""
+        text = self._text_edit.text().strip().lower()
+        node_type = self._type_combo.currentData()
+        strength_filter = self._strength_combo.currentData()
+        direction_filter = self._direction_combo.currentData()
+        date_from = self._date_from.text().strip()
+        date_to = self._date_to.text().strip()
+
+        # Знаходимо вузли що задовольняють фільтрам
+        matched_nodes: list[str] = []
+        for uid, node in self._canvas.nodes.items():
+            if text and text not in (node.title or '').lower():
+                continue
+            if node_type and node.type != node_type:
+                continue
+            if date_from and node.date and node.date < date_from:
+                continue
+            if date_to and node.date and node.date > date_to:
+                continue
+            matched_nodes.append(uid)
+
+        # Якщо є фільтри по зв'язках — звужуємо до вузлів з такими зв'язками
+        if strength_filter or direction_filter:
+            linked_nodes: set[str] = set()
+            for lk in self._canvas.links.values():
+                if strength_filter and getattr(lk, 'strength', '') != strength_filter:
+                    continue
+                if direction_filter and lk.direction != direction_filter:
+                    continue
+                linked_nodes.add(lk.source_uuid)
+                linked_nodes.add(lk.target_uuid)
+            matched_nodes = [u for u in matched_nodes if u in linked_nodes]
+
+        # Відображаємо/ховаємо
+        all_uuids = set(self._canvas.nodes.keys())
+        matched_set = set(matched_nodes)
+        for uid, it in self._canvas.node_items.items():
+            it.setVisible(uid in matched_set)
+        for uid, li in self._canvas.link_items.items():
+            lk = self._canvas.links.get(uid)
+            if lk:
+                visible = lk.source_uuid in matched_set and lk.target_uuid in matched_set
+                li.setVisible(visible)
+
+        # Список результатів
+        self._results_list.clear()
+        for uid in matched_nodes:
+            node = self._canvas.nodes[uid]
+            item = QListWidgetItem(f"{node.title or '(без назви)'}  [{node.type}]")
+            item.setData(Qt.ItemDataRole.UserRole, uid)
+            self._results_list.addItem(item)
+        self._results_label.setText(f'Результати: {len(matched_nodes)} знайдено')
+
+    def _reset(self) -> None:
+        """Скидає фільтри і відображає всі вузли."""
+        self._text_edit.clear()
+        self._type_combo.setCurrentIndex(0)
+        self._strength_combo.setCurrentIndex(0)
+        self._direction_combo.setCurrentIndex(0)
+        self._date_from.clear()
+        self._date_to.clear()
+        self._results_list.clear()
+        self._results_label.setText('Результати:')
+        self._canvas.show_all_nodes()
+
+    def _on_result_clicked(self, item: QListWidgetItem) -> None:
+        """Центрує вигляд на вибраному вузлі."""
+        uid = item.data(Qt.ItemDataRole.UserRole)
+        node_it = self._canvas.node_items.get(uid)
+        if node_it:
+            self._canvas.centerOn(node_it)
+            self._canvas.scene().clearSelection()
+            node_it.setSelected(True)
+
+
+# ---------------------------------------------------------------------------
 # Головне вікно програми
 # ---------------------------------------------------------------------------
 
@@ -3242,6 +3890,18 @@ class MainWindow(QMainWindow):
         )
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._filter_dock)
         self._filter_dock.hide()
+
+        # --- Панель візуального пошуку (P2.6) ---
+        self.visual_search_panel = VisualSearchPanel(self.canvas, self)
+        self._visual_search_dock = QDockWidget('Візуальний пошук', self)
+        self._visual_search_dock.setWidget(self.visual_search_panel)
+        self._visual_search_dock.setAllowedAreas(
+            Qt.DockWidgetArea.BottomDockWidgetArea |
+            Qt.DockWidgetArea.LeftDockWidgetArea |
+            Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._visual_search_dock)
+        self._visual_search_dock.hide()
 
         # Мінімапа
         self._minimap_view = MinimapView(self.canvas._scene, self.canvas, self)
@@ -3537,6 +4197,20 @@ class MainWindow(QMainWindow):
         act_layout_radial.triggered.connect(self.canvas.auto_layout_radial)
         auto_layout_menu.addAction(act_layout_radial)
 
+        auto_layout_menu.addSeparator()
+
+        act_layout_circular = QAction('Circular (i2)', self)
+        act_layout_circular.triggered.connect(self.canvas.auto_layout_circular)
+        auto_layout_menu.addAction(act_layout_circular)
+
+        act_layout_hierarchy = QAction('Hierarchy (i2)', self)
+        act_layout_hierarchy.triggered.connect(self.canvas.auto_layout_hierarchy)
+        auto_layout_menu.addAction(act_layout_hierarchy)
+
+        act_layout_peacock = QAction('Peacock (i2)', self)
+        act_layout_peacock.triggered.connect(self.canvas.auto_layout_peacock)
+        auto_layout_menu.addAction(act_layout_peacock)
+
         # ---- Інструменти ----
         tools_menu = menubar.addMenu('Інструменти')
 
@@ -3558,6 +4232,24 @@ class MainWindow(QMainWindow):
         act_filter_tool = QAction('Фільтр', self)
         act_filter_tool.triggered.connect(self._action_filter)
         tools_menu.addAction(act_filter_tool)
+
+        act_visual_search = QAction('Візуальний пошук…', self)
+        act_visual_search.setShortcut(QKeySequence('Ctrl+Alt+F'))
+        act_visual_search.triggered.connect(
+            lambda: self._visual_search_dock.setVisible(not self._visual_search_dock.isVisible())
+        )
+        tools_menu.addAction(act_visual_search)
+
+        tools_menu.addSeparator()
+
+        act_find_path = QAction('Знайти шлях між вузлами…', self)
+        act_find_path.setShortcut(QKeySequence('Ctrl+Shift+F'))
+        act_find_path.triggered.connect(self._action_find_path)
+        tools_menu.addAction(act_find_path)
+
+        act_show_all = QAction('Показати всі елементи', self)
+        act_show_all.triggered.connect(self.canvas.show_all_nodes)
+        tools_menu.addAction(act_show_all)
 
         # ---- Довідка ----
         help_menu = menubar.addMenu('Довідка')
@@ -3772,6 +4464,9 @@ class MainWindow(QMainWindow):
             line_type=data['line_type'],
             direction=data['direction'],
             note=data['note'],
+            color=data['color'],
+            width=data['width'],
+            strength=data.get('strength', 'Confirmed'),
         )
         self.canvas.undo_stack.push(AddLinkCommand(self.canvas, link))
         self.statusBar().showMessage("Зв'язок додано", 2000)
@@ -3787,7 +4482,7 @@ class MainWindow(QMainWindow):
         new_data = dialog.get_node_data()
         if not new_data:
             return
-        old_data = {k: getattr(node, k) for k in ['type', 'title', 'note', 'date', 'color', 'photo_base64']}
+        old_data = {k: getattr(node, k) for k in ['type', 'title', 'note', 'date', 'color', 'photo_base64', 'frame_enabled', 'frame_color', 'frame_width']}
         self.canvas.undo_stack.push(EditNodeCommand(self.canvas, node_uuid, old_data, new_data))
 
     def _on_edit_link(self, link_uuid: str) -> None:
@@ -3799,7 +4494,7 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         new_data = dialog.get_link_data()
-        old_data = {k: getattr(link, k) for k in ['label', 'line_type', 'direction', 'note']}
+        old_data = {k: getattr(link, k) for k in ['label', 'line_type', 'direction', 'note', 'color', 'width', 'strength']}
         self.canvas.undo_stack.push(EditLinkCommand(self.canvas, link_uuid, old_data, new_data))
 
     def _action_delete(self) -> None:
@@ -3838,7 +4533,7 @@ class MainWindow(QMainWindow):
             self.canvas.undo_stack.push(DeleteLinksCommand(self.canvas, all_links))
 
         if sel_shapes:
-            self.canvas.undo_stack.push(DeleteShapeCommand(self.canvas._scene, sel_shapes))
+            self.canvas.undo_stack.push(DeleteShapeCommand(self.canvas, sel_shapes))
             self.canvas.mark_modified()
 
     def _action_duplicate(self) -> None:
@@ -3931,6 +4626,36 @@ class MainWindow(QMainWindow):
     def _action_filter(self) -> None:
         """Перемикає видимість панелі фільтрів."""
         self._filter_dock.setVisible(not self._filter_dock.isVisible())
+
+    def _action_find_path(self) -> None:
+        """Діалог пошуку найкоротшого шляху між двома вузлами."""
+        node_titles = {uid: (n.title or uid[:8]) for uid, n in self.canvas.nodes.items()}
+        if len(node_titles) < 2:
+            QMessageBox.information(self, 'Find Path', 'Потрібно щонайменше 2 вузли.')
+            return
+
+        items = [f"{t}  [{uid[:8]}]" for uid, t in node_titles.items()]
+        uid_list = list(node_titles.keys())
+
+        start_label, ok1 = QInputDialog.getItem(
+            self, 'Find Path', 'Початковий вузол:', items, 0, False
+        )
+        if not ok1:
+            return
+        end_label, ok2 = QInputDialog.getItem(
+            self, 'Find Path', 'Кінцевий вузол:', items, 1, False
+        )
+        if not ok2:
+            return
+
+        start_uuid = uid_list[items.index(start_label)]
+        end_uuid = uid_list[items.index(end_label)]
+
+        path = self.canvas.find_path_between(start_uuid, end_uuid)
+        if path:
+            self.canvas.highlight_path(path)
+        else:
+            QMessageBox.information(self, 'Find Path', 'Шлях між вузлами не знайдено.')
 
     def _on_minimap_toggle(self, checked: bool) -> None:
         self._minimap_dock.setVisible(checked)
